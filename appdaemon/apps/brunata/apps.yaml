@@ -1,0 +1,9 @@
+hello_world:
+  module: hello
+  class: HelloWorld
+
+brunata:
+  module: brunata_app
+  class: BrunataApp
+  data_file: /config/apps/brunata/data/consumption.json
+  update_interval: 300
