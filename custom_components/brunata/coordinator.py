@@ -1,132 +1,104 @@
 """DataUpdateCoordinator for Brunata Online, incl. historical meter import.
 
-See docs/api-reference.md for the confirmed 600-item limit on
-GET /consumer/meters/{meterId}/metervalues and the reasoning behind the
-adaptive chunking strategy below.
-
-NOTE: only the historical-import piece is implemented here so far. Regular
-periodic updates (async_update_data / meteroverview polling) and writing
-imported points into HA long-term statistics are follow-up work — see
-copilot-instructions-del2.md, Trin 2.
+The chunking algorithm for historical import lives in brunata_client.history
+(no `homeassistant` dependency, so it's also usable from standalone scripts —
+see scripts/history_smoke_test.py). This module wraps it for the one-time
+backfill, and drives the regular hourly live-data polling.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from brunata_client import BrunataClient
-from brunata_client.exceptions import BrunataDataError
+from brunata_client.exceptions import BrunataLoginError, BrunataSessionError
+from brunata_client.history import fetch_all_meter_history
+from brunata_client.models import ConsumptionData
 
-from .const import DOMAIN
+from . import statistics
+from .const import (
+    ALLOCATION_UNIT_NAMES,
+    ALLOCATION_UNIT_SLUGS,
+    CONF_HISTORY_IMPORTED,
+    DOMAIN,
+    UPDATE_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-# /consumer/meters/{meterId}/metervalues returns at most 600 points per call
-# and silently drops everything older than the 600 newest when the window
-# holds more (limited=True) — see docs/api-reference.md. Older periods are far
-# sparser than recent ones, so we start wide and only shrink when the server
-# actually reports limited=True, instead of guessing a fixed chunk size.
-_INITIAL_HISTORY_INTERVAL = timedelta(days=365)
-_MIN_HISTORY_INTERVAL = timedelta(hours=1)
+# unit code -> HA unit of measurement, matching sensor.py's native units.
+_UNIT_OF_MEASUREMENT = {"O": "kWh", "W": "m³", "K": "m³"}
 
 
-def _parse_brunata_datetime(value: str) -> datetime:
-    """Parse a Brunata timestamp/date string (e.g. "2026-07-12T19:42:00+02:00"
-    or a bare "2025-03-25" mountingDate) into an aware datetime.
-    """
-    dt = datetime.fromisoformat(value)
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    return dt
-
-
-class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
+class BrunataDataUpdateCoordinator(DataUpdateCoordinator[ConsumptionData]):
     """Coordinates fetching data from the Brunata Online API."""
 
-    def __init__(self, hass: HomeAssistant, client: BrunataClient) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: BrunataClient) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(hours=1),
+            update_interval=UPDATE_INTERVAL,
         )
+        self.entry = entry
         self.client = client
 
-    # ------------------------------------------------------------------
-    # Historical import
-    # ------------------------------------------------------------------
+    async def _async_update_data(self) -> ConsumptionData:
+        try:
+            return await self.client.fetch_consumption_data()
+        except (BrunataLoginError, BrunataSessionError):
+            # Session/token likely expired between polls — one re-login retry
+            # before giving up (see docs/login-flow.md on session lifetime).
+            try:
+                await self.client.login()
+                return await self.client.fetch_consumption_data()
+            except Exception as err:
+                raise UpdateFailed(str(err)) from err
+        except Exception as err:
+            raise UpdateFailed(str(err)) from err
 
-    async def async_fetch_meter_history(
-        self,
-        meter_id: int,
-        start: datetime,
-        until: datetime | None = None,
-    ) -> list[dict]:
-        """Fetch a meter's full readings from `start` to `until` (default: now).
+    async def async_import_history_if_needed(self) -> None:
+        """One-time backfill from each meter's mountingDate to first setup.
 
-        Implements the adaptive chunking strategy confirmed in
-        docs/api-reference.md:
-
-        1. Start with a large window (`_INITIAL_HISTORY_INTERVAL`).
-        2. Call metervalues for [cursor, cursor + window).
-        3. If the response is `limited`, halve the window and retry the SAME
-           cursor (not the whole period from scratch).
-        4. Once a call comes back unlimited, keep its points, advance the
-           cursor to just after the last point actually returned, and repeat
-           (trying to grow the window back up) until `until` is reached.
+        Never runs again once CONF_HISTORY_IMPORTED is set on the config
+        entry — ongoing data comes from the regular hourly meteroverview
+        polling above, via the recorder's automatic statistics compilation.
         """
-        now = until or datetime.now().astimezone()
-        cursor = start
-        window = _INITIAL_HISTORY_INTERVAL
-        points: list[dict] = []
+        if self.entry.data.get(CONF_HISTORY_IMPORTED):
+            return
 
-        while cursor < now:
-            end = min(cursor + window, now)
-            payload = await self.client.fetch_meter_values(meter_id, cursor, end)
+        meters_by_id = {
+            m["meterId"]: m for m in await self.client.fetch_meters_for_consumer()
+        }
+        results = await fetch_all_meter_history(self.client)
 
-            if payload.get("limited"):
-                window /= 2
-                if window < _MIN_HISTORY_INTERVAL:
-                    raise BrunataDataError(
-                        f"meter {meter_id}: still limited at a {window} window "
-                        f"between {cursor} and {end} — more than 600 readings "
-                        "in under an hour is unexpected per docs/api-reference.md"
-                    )
-                continue  # retry the same cursor with the halved window
+        for result in results:
+            meter = meters_by_id.get(result.meter_id)
+            if meter is None:
+                _LOGGER.warning(
+                    "History fetched for meter %s but it's missing from "
+                    "metersforconsumer — skipping statistics import",
+                    result.meter_id,
+                )
+                continue
 
-            values = payload.get("meterValues", [])
-            points.extend(values)
+            allocation_unit = meter["allocationUnit"]
+            slug = ALLOCATION_UNIT_SLUGS.get(allocation_unit)
+            if slug is None:
+                continue  # not one of O/W/K — shouldn't happen, fetch_all_meter_history already filters
 
-            if values:
-                last_date = max(_parse_brunata_datetime(v["readingDate"]) for v in values)
-                cursor = last_date + timedelta(seconds=1)
-            else:
-                cursor = end  # nothing in this window — move on regardless
+            await statistics.async_import_meter_history(
+                self.hass,
+                entity_id=f"sensor.brunata_{slug}",
+                unit_of_measurement=_UNIT_OF_MEASUREMENT[allocation_unit],
+                name=f"Brunata {ALLOCATION_UNIT_NAMES[allocation_unit]}",
+                points=result.points,
+            )
 
-            # Data density varies a lot over the years (docs/api-reference.md);
-            # try growing the window back up for the next chunk instead of
-            # staying stuck at a small size picked for a denser period.
-            window = min(window * 2, _INITIAL_HISTORY_INTERVAL)
-
-        return points
-
-    async def async_fetch_all_meter_history(self) -> dict[int, list[dict]]:
-        """Fetch full history for every meter from its mountingDate to now
-        (or to dismountedDate for meters no longer in use).
-        """
-        meters = await self.client.fetch_meters_for_consumer()
-        now = datetime.now().astimezone()
-        history: dict[int, list[dict]] = {}
-
-        for meter in meters:
-            meter_id = meter["meterId"]
-            start = _parse_brunata_datetime(meter["mountingDate"])
-            dismounted = meter.get("dismountedDate")
-            until = _parse_brunata_datetime(dismounted) if dismounted else now
-            history[meter_id] = await self.async_fetch_meter_history(meter_id, start, until)
-
-        return history
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, CONF_HISTORY_IMPORTED: True}
+        )

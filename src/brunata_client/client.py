@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
 
-from .exceptions import BrunataLoginError, BrunataDataError, BrunataSessionError
+from .exceptions import BrunataLoginError, BrunataDataError, BrunataHttpError, BrunataSessionError
 from .models import ConsumptionData, MeterReading
 from .parser import parse_consumption_payload
 
@@ -229,8 +229,9 @@ class BrunataClient:
                 headers={"Authorization": f"Bearer {self._access_token}"},
             )
         if resp.status_code != 200:
-            raise BrunataDataError(
-                f"API request to {url} failed: {resp.status_code} {resp.text}"
+            raise BrunataHttpError(
+                resp.status_code,
+                f"API request to {url} failed: {resp.status_code} {resp.text}",
             )
         return resp.json()
 
