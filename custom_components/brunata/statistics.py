@@ -17,7 +17,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.core import HomeAssistant
 
-from brunata_client.history import parse_brunata_datetime
+from .brunata_client.history import parse_brunata_datetime
 
 
 def _bucket_by_hour(points: list[dict]) -> list[StatisticData]:

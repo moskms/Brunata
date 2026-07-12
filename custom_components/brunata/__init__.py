@@ -7,8 +7,8 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from brunata_client import BrunataClient
-from brunata_client.exceptions import BrunataLoginError
+from .brunata_client import BrunataClient
+from .brunata_client.exceptions import BrunataLoginError
 
 from .const import DOMAIN, PLATFORMS
 from .coordinator import BrunataDataUpdateCoordinator
