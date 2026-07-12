@@ -1,238 +1,82 @@
-# Brunata Client
+# Brunata Online — Home Assistant-integration
 
-Uofficiel Python-klient til [Brunata Online](https://online.brunata.com) for beboere.
-Henter forbrugsdata (varme, varmt vand, koldt vand) fra Brunata's portal.
+En Home Assistant custom integration, der henter vand- og varmeforbrug fra
+[Brunata Online](https://online.brunata.com) for private forbrugere, og gør dataene tilgængelige
+som sensorer i Home Assistant — inklusive automatisk import af historisk forbrug ved opsætning.
 
-> **Note:** Dette er en uofficiel klient og kan holde op med at virke hvis Brunata ændrer deres portal.
+> Uofficiel integration. Ikke tilknyttet eller understøttet af Brunata A/S. Bygget ved at
+> reverse-engineere den offentligt tilgængelige Brunata Online-portal — se
+> [`docs/login-flow.md`](docs/login-flow.md) og [`docs/api-reference.md`](docs/api-reference.md)
+> for detaljer om, hvordan det er gjort.
 
----
+## Funktioner
 
-## Hvad gør dette projekt?
-
-Projektet består af to dele:
-
-**Del 1 — Python-klient (`brunata_client`)**
-- Indlæser forbrugsdata fra en lokal `consumption.json`-fil (offline/test mode)
-- Implementerer Azure AD B2C PKCE login-flow til fremtidig live-hentning
-- Eksponerer data som Python-dataklasser (`ConsumptionData`, `MeterReading`)
-- Kan køres fra kommandolinjen via `main.py`
-
-**Del 2 — Home Assistant integration via AppDaemon**
-- AppDaemon-app der publicerer Brunata-data som HA-sensorer
-- Sensorer opdateres automatisk fra `consumption.json` (offline mode)
-- Klar til live-opdatering når Del 2 Fase 2 implementeres
-
----
+- **Kun brugernavn og password** — opsætning foregår helt gennem Home Assistants UI
+  (Indstillinger → Enheder & tjenester), ingen YAML eller manuel konfiguration nødvendig.
+- **Tre sensorer**: koldt vand (m³), varmt vand (m³), varme (kWh), alle med korrekt `device_class`
+  og `state_class: total_increasing`, så de virker direkte i HA's Energidashboard.
+- **Automatisk historik-import** ved første opsætning — henter så meget historik, som Brunata har
+  tilgængeligt for den enkelte måler (typisk flere år tilbage), og lægger det ind som Home
+  Assistant long-term statistics, så graferne er fyldt med det samme i stedet for at starte fra nul.
+- **Timelig opdatering** af de aktuelle værdier efter opsætning (Brunata-målere rapporterer typisk
+  ikke oftere end det alligevel).
 
 ## Krav
 
-- Python 3.12 eller nyere
-- Pakker: se `pyproject.toml`
-- Home Assistant med AppDaemon-addon (til HA-integration)
+- Home Assistant 2024.x eller nyere (bruger `homeassistant.components.recorder.statistics` til
+  historik-import).
+- En aktiv Brunata Online-konto med adgang til `online.brunata.com`.
+- Internetadgang fra din Home Assistant-installation (`iot_class: cloud_polling`).
 
----
+## Installation
 
-## Installation (Python-klient)
+### Manuel installation (indtil HACS-understøttelse er på plads)
 
-```bash
-pip install -e ".[dev]"
-```
+1. Kopiér hele mappen `custom_components/brunata/` fra dette repository ind i din Home
+   Assistant-konfiguration, så den ender som:
+   ```
+   config/custom_components/brunata/
+   ```
+2. Genstart Home Assistant (Indstillinger → System → Genstart).
+3. Gå til **Indstillinger → Enheder & tjenester → + Tilføj integration**, og søg efter
+   **"Brunata Online"**.
+4. Indtast dit brugernavn (email) og password til Brunata Online, og klik **Send**.
 
----
+Integrationen validerer dit login med det samme og opretter herefter automatisk en enhed med de
+tre sensorer, samt starter historik-importen i baggrunden.
 
-## Opsætning
+### Via HACS
 
-Opret en `.env` fil i projektmappen (se `.env.example`):
+Ikke understøttet endnu — pakning til HACS (`hacs.json`, versionering, releases) er planlagt, men
+ikke lavet endnu. Følg punktet ovenfor indtil videre.
 
-```env
-BRUNATA_USERNAME=dit@email.dk
-BRUNATA_PASSWORD=din_hemmelige_kode
-```
+## Konfiguration
 
----
+Der er ingen yderligere konfiguration ud over brugernavn/password ved opsætning. Skal du opdatere
+dit password senere (fx efter du selv har skiftet det på Brunatas hjemmeside), bruges
+integrationens **Reconfigure**-funktion (klik på de tre prikker ud for integrationen under
+Enheder & tjenester).
 
-## Kørsel
+## Kendte begrænsninger
 
-### Offline / test mode (ingen login)
+- Dette er en **uofficiel, reverse-engineered integration**. Brunata kan til enhver tid ændre deres
+  interne API uden varsel, hvilket kan få integrationen til at holde op med at virke.
+- Kun testet mod private forbrugerkonti (`online.brunata.com`) — erhvervskonti eller andre
+  Brunata-portaler (fx den tyske Brunata München-portal) er ikke understøttet.
+- Varme-sensorens konvertering fra pulser til kWh er baseret på en `scale`-faktor hentet fra
+  Brunatas eget API — se `docs/api-reference.md` for detaljer, hvis tallene skulle se forkerte ud
+  for din opsætning.
 
-Indlæs data fra en tidligere gemt `consumption.json`:
+## Udvikling
 
-```bash
-python main.py --file data/consumption.json
-```
+Se [`copilot-instructions-del2.md`](copilot-instructions-del2.md) for den fulde arkitekturplan, og
+`docs/`-mappen for al reverse-engineering-dokumentation (login-flow, API-endpoints, bekræftede
+grænser). Kildekoden til selve Brunata-klienten (login, datahentning, historik-chunking) ligger i
+`src/brunata_client/` med et selvstændigt testsuite (`pytest tests/ -v`, kører fuldt offline mod
+fixtures — ingen netværkskald).
 
-Kort opsummering i stedet for rå JSON:
+## Ansvarsfraskrivelse
 
-```bash
-python main.py --file data/consumption.json --summary
-```
-
-Gem output til en ny fil:
-
-```bash
-python main.py --file data/consumption.json --output data/output.json
-```
-
-### Live mode (kræver `.env` med credentials)
-
-> **TODO / eksperimentel** — live mode er endnu ikke fuldt implementeret.
-
-```bash
-python main.py --live
-```
-
----
-
-## Eksempel på output
-
-```json
-{
-  "heat_kwh": 6087.882,
-  "hot_water_m3": 151.204,
-  "cold_water_m3": 167.439,
-  "last_updated": "2026-05-12T12:40:00+02:00",
-  "raw_meters": [
-    {
-      "meter_id": 8260593,
-      "meter_no": "60886237",
-      "placement": "Entre",
-      "allocation_unit": "W",
-      "unit": 8,
-      "unit_label": "m³",
-      "scale": null,
-      "reading_value": 151.204,
-      "reading_date": "2026-05-12T11:38:00+02:00",
-      "transmitting": true
-    }
-  ]
-}
-```
-
----
-
-## Tests
-
-```bash
-pytest tests/ -v
-```
-
-Alle tests kører offline mod `data/consumption.json` — ingen credentials nødvendige.
-
----
-
-## Projektstruktur
-
-```
-brunata_client/
-├── src/brunata_client/
-│   ├── __init__.py        # Eksporterer BrunataClient
-│   ├── client.py          # BrunataClient: load_from_file(), login(), ...
-│   ├── parser.py          # parse_consumption_payload()
-│   ├── models.py          # ConsumptionData, MeterReading
-│   └── exceptions.py      # BrunataLoginError, BrunataDataError, BrunataSessionError
-├── appdaemon/
-│   └── apps/brunata/
-│       ├── brunata_app.py # AppDaemon-app til Home Assistant
-│       └── apps.yaml      # AppDaemon konfiguration
-├── scripts/
-│   ├── install_brunata.py # Installationsscript til HA (kør i HA-terminal)
-│   └── ha_cleanup.py      # Oprydningsscript til HA (kør i HA-terminal)
-├── tests/
-│   └── test_client.py
-├── data/
-│   └── consumption.json   # Seneste hentede data (ikke i git)
-├── main.py
-├── pyproject.toml
-└── .env.example
-```
-
----
-
-## Home Assistant — AppDaemon integration
-
-Brunata-data kan publiceres som sensorer i Home Assistant via AppDaemon.
-Scriptet `scripts/install_brunata.py` håndterer hele installationen automatisk.
-
-### Sensorer der oprettes
-
-| Entity ID | Enhed | Beskrivelse |
-|---|---|---|
-| `sensor.brunata_heat_kwh` | kWh | Samlet varmeforbrug |
-| `sensor.brunata_hot_water_m3` | m³ | Varmt vandforbrug |
-| `sensor.brunata_cold_water_m3` | m³ | Koldt vandforbrug |
-| `sensor.brunata_last_updated` | — | Tidspunkt for seneste måleraflæsning |
-
-Opdateringsinterval: hvert 5. minut (konfigurerbart via `update_interval` i `apps.yaml`).
-
-### Krav
-
-- Home Assistant OS eller Supervised
-- [AppDaemon-addon](https://github.com/hassio-addons/addon-appdaemon) installeret og startet
-- En gyldig `consumption.json` fra Brunata
-
-### Trin 1 — Forbered filer på Windows
-
-Kør PowerShell-scriptet for at sikre lokale filer er korrekte:
-
-```powershell
-p:\Brunata\scripts\cleanup_appdaemon.ps1
-```
-
-### Trin 2 — Kopier til Home Assistant
-
-Kopier følgende to filer til HA's `/config/`-mappe (f.eks. via Total Commander, Samba eller File Editor):
-
-| Fil (Windows) | Destination (HA) |
-|---|---|
-| `scripts/install_brunata.py` | `/config/install_brunata.py` |
-| `data/consumption.json` | `/config/consumption.json` |
-
-### Trin 3 — Kør installationsscriptet
-
-Åbn HA-terminalen (SSH-addon eller Terminal-addon) og kør:
-
-```bash
-python /homeassistant/install_brunata.py
-```
-
-Scriptet opretter automatisk:
-```
-/addon_configs/a0d7b954_appdaemon/apps/brunata/
-├── brunata_app.py
-├── brunata_client/          ← hele pakken kopieres hertil
-│   ├── __init__.py
-│   ├── client.py
-│   ├── exceptions.py
-│   ├── models.py
-│   └── parser.py
-└── data/
-    └── consumption.json
-```
-
-og tilføjer `brunata`-sektionen til AppDaemon's `apps.yaml`.
-
-### Trin 4 — Genstart AppDaemon
-
-```bash
-ha apps restart a0d7b954_appdaemon
-```
-
-### Trin 5 — Verificer
-
-Gå til **Developer Tools → States** i HA og søg på `brunata`.
-Alle 4 sensorer skal vises med aktuelle værdier.
-
-### Oprydning
-
-Hvis du vil fjerne alt Brunata-relateret fra HA igen:
-
-```bash
-# Kopier scripts/ha_cleanup.py til /config/ha_cleanup.py, derefter:
-python /homeassistant/ha_cleanup.py
-```
-
-### Bemærkninger
-
-- AppDaemon's `app_dir` er `/config/apps/` set fra AppDaemon's container, hvilket svarer til `/addon_configs/a0d7b954_appdaemon/apps/` på host-filsystemet
-- Sensorernes `m³`-enhed vises korrekt i HA — terminal-visning kan vise tegnet forkert pga. encoding
-- `httpx`-pakken er ikke nødvendig for offline mode og importeres derfor kun ved live login
+Dette projekt er ikke tilknyttet, godkendt af, eller understøttet af Brunata A/S. Brug på eget
+ansvar. Login-flowet er reverse-engineered fra den offentligt tilgængelige webportal og kan ophøre
+med at virke, hvis Brunata ændrer deres systemer.
