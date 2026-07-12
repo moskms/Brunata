@@ -9,8 +9,8 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
 
-from brunata_client import BrunataClient
-from brunata_client.exceptions import BrunataLoginError
+from .brunata_client import BrunataClient
+from .brunata_client.exceptions import BrunataLoginError
 
 from .const import DOMAIN
 

@@ -14,10 +14,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from brunata_client import BrunataClient
-from brunata_client.exceptions import BrunataLoginError, BrunataSessionError
-from brunata_client.history import fetch_all_meter_history
-from brunata_client.models import ConsumptionData
+from .brunata_client import BrunataClient
+from .brunata_client.exceptions import BrunataLoginError, BrunataSessionError
+from .brunata_client.history import fetch_all_meter_history
+from .brunata_client.models import ConsumptionData
 
 from . import statistics
 from .const import (
