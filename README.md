@@ -57,6 +57,16 @@ dit password senere (fx efter du selv har skiftet det på Brunatas hjemmeside), 
 integrationens **Reconfigure**-funktion (klik på de tre prikker ud for integrationen under
 Enheder & tjenester).
 
+### Debug-eksport af rå målerhistorik
+
+Ved den allerførste opsætning (den engangs-historiske backfill) skriver integrationen én JSON-fil
+pr. aktiv måler til `config/brunata_debug/{meter_id}.json` i din Home Assistant-instans, med de RÅ
+værdier Brunata returnerede — før nogen omregning, skalering eller reset-kompensation — så du kan
+sammenligne dem direkte med Brunatas egen "Aflæsninger og målere"-side. **Denne mappe indeholder
+personlige forbrugsdata og bør ikke committes til git eller deles** — den er allerede tilføjet til
+`.gitignore`, men ligger uden for selve repoet (i din HA-instans' `config/`-mappe), så tjek selv at
+den ikke havner i en backup eller et andet repo, du deler.
+
 ## Kendte begrænsninger
 
 - Dette er en **uofficiel, reverse-engineered integration**. Brunata kan til enhver tid ændre deres

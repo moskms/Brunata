@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
@@ -10,8 +14,28 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from .brunata_client import BrunataClient
 from .brunata_client.exceptions import BrunataLoginError
 
+from . import websocket_api
 from .const import DOMAIN, PLATFORMS
 from .coordinator import BrunataDataUpdateCoordinator
+
+# Del 3b frontend card. Registered once in async_setup (domain-wide, not
+# per-entry) — same reasoning as the WebSocket commands below.
+_FRONTEND_JS_URL = "/brunata_static/brunata-monthly-card.js"
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Called once per HA startup, regardless of how many config entries exist."""
+    websocket_api.async_register_commands(hass)
+
+    js_path = os.path.join(os.path.dirname(__file__), "www", "brunata-monthly-card.js")
+    # NOTE: StaticPathConfig / async_register_static_paths is the current
+    # (HA 2023.9+) async API for this — worth checking against your actual
+    # HA version if this raises, same caveat as the recorder statistics API.
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(_FRONTEND_JS_URL, js_path, cache_headers=False)]
+    )
+    frontend.add_extra_js_url(hass, _FRONTEND_JS_URL)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
