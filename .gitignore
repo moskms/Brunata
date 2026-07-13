@@ -5,6 +5,11 @@
 # Data — indeholder personlige forbrugsdata
 data/consumption.json
 
+# Debug-eksport af rå målerhistorik (custom_components/brunata/debug_export.py
+# skriver disse til en rigtig HA-instans' config/-mappe) — personlige data
+brunata_debug/
+config/brunata_debug/
+
 # Python
 __pycache__/
 *.py[cod]
