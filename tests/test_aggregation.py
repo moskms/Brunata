@@ -238,6 +238,139 @@ def test_compute_monthly_summary_for_year_tz_aware_rows_same_calendar_month():
     assert julys[0]["consumption"] == pytest.approx(30.0)  # 160 - 130, last July row wins
 
 
+# ---------------------------------------------------------------------------
+# 2026-07-13 HA recorder "sum"-column discontinuity — state-based fix
+#
+# Confirmed real incident: HA's own compiled "sum" for
+# sensor.brunata_varmt_vand_entre collapsed from 135.99 to 0.006 on
+# 2026-07-13, with last_reset staying null (HA itself never flagged a
+# reset) — while the raw "state" field kept climbing smoothly across the
+# same day, matching the live sensor exactly. statistics.py's
+# _normalize_state_rows() now computes period sums from "state" via
+# compute_reset_compensated_sums() instead of trusting the recorder's own
+# "sum" column, specifically to be immune to this class of bug. These
+# tests reproduce the incident's actual state values (day-level, 1-14 July)
+# to prove the fix, entirely offline.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_reset_compensated_sums_immune_to_july13_sum_column_glitch():
+    # Real "state" values from the 14 daily rows (1-14 July 2026), smoothly
+    # climbing throughout — this is the ground truth the live sensor showed,
+    # unaffected by whatever the recorder's own "sum" column did.
+    states = [
+        153.68, 153.71, 153.75, 153.79, 153.82, 153.86, 153.90,
+        153.93, 153.95, 153.98, 154.02, 154.05, 154.19, 154.212,
+    ]
+    sums = compute_reset_compensated_sums(states)
+
+    # Monotonically increasing throughout, including across day 13 — no
+    # dip/collapse of the kind HA's own "sum" column exhibited that day.
+    assert all(later >= earlier for earlier, later in zip(sums, sums[1:]))
+
+    # Day 13's own consumption (state 154.05 -> 154.19) is a normal, small
+    # positive delta — NOT the near-total collapse HA's own "sum" column
+    # showed for the same day (135.99 -> 0.006).
+    day13_consumption = sums[12] - sums[11]
+    assert day13_consumption == pytest.approx(154.19 - 154.05)
+    assert day13_consumption > 0
+
+    # Total consumption across the full 14 days matches the simple
+    # first-to-last state delta — i.e. nothing was lost or double-counted
+    # by (wrongly) treating day 13 as a physical reset.
+    assert sums[-1] - sums[0] == pytest.approx(states[-1] - states[0])
+
+
+def test_compute_daily_breakdown_immune_to_july13_sum_column_glitch():
+    # Same incident, run through the actual daily_breakdown row shape
+    # (_normalize_state_rows' output: {"start": datetime, "sum": <state,
+    # already reset-compensated>}) to prove the full call path — not just
+    # the low-level compensation function — produces a correct, continuous
+    # July, with no "—" gap and no bogus near-100% single-day spike.
+    states = [
+        153.68, 153.71, 153.75, 153.79, 153.82, 153.86, 153.90,
+        153.93, 153.95, 153.98, 154.02, 154.05, 154.19, 154.212,
+    ]
+    compensated = compute_reset_compensated_sums(states)
+    rows = [
+        {"start": _dt(2026, 7, day) if day > 1 else _dt(2026, 6, 30), "sum": value}
+        for day, value in zip(range(1, 15), compensated)
+    ]
+    breakdown = compute_daily_breakdown(rows)
+
+    by_day = {row["day"]: row["consumption"] for row in breakdown}
+    # Every day has a real (non-None, non-huge) consumption figure — in
+    # particular day 13, the day HA's own "sum" column collapsed on.
+    assert all(c is not None for c in by_day.values())
+    assert by_day[13] == pytest.approx(154.19 - 154.05)
+    assert by_day[13] < 1.0  # nowhere near the ~136 "reset" HA's sum column implied
+
+
+# ---------------------------------------------------------------------------
+# allow_physical_reset / invalid_indices — the general data-validation layer
+#
+# Independent of, and layered on top of, the physical-reset compensation
+# above: for meter types that cannot physically reset (water), any drop is
+# rejected as invalid data (frozen at the last known-valid value, zero
+# consumption for that period) rather than treated as a reset. This protects
+# against ANY future unexplained negative discontinuity in the source data,
+# not just the specific 2026-07-13 HA "sum"-column incident — including the
+# (worse) hypothetical case where a similar glitch shows up directly in
+# "state" itself, which the state-based switch alone wouldn't catch.
+# ---------------------------------------------------------------------------
+
+
+def test_allow_physical_reset_false_rejects_drop_instead_of_compensating():
+    # Same shape as the real heat-meter reset case, but for a meter type that
+    # is NOT allowed to reset (water): the drop must be rejected, not added
+    # as a new cycle.
+    values = [6100.0, 6200.0, 51.0, 75.0]
+    invalid_indices: list[int] = []
+    sums = compute_reset_compensated_sums(
+        values, allow_physical_reset=False, invalid_indices=invalid_indices
+    )
+    # 75.0 is still below 6200*0.9, so it's also rejected as invalid — a
+    # meter that's actually reset would need several genuinely climbing
+    # readings before one lands back above the 90% threshold again.
+    assert invalid_indices == [2, 3]
+    # Frozen at the last known-valid value for both rejected periods: zero
+    # consumption, not a huge negative delta nor a bogus "reset" addition.
+    assert sums[2] == sums[1]
+    assert sums[3] == sums[1]
+
+
+def test_allow_physical_reset_false_true_july13_style_glitch_self_heals():
+    # Reproduces the July 13 incident's magnitude directly (135.99 -> 0.006,
+    # ~99.99% drop) as if it had occurred in "state" itself, not just HA's
+    # own "sum" column — the worst case the previous round's fix (switching
+    # to "state") would NOT have caught on its own. With
+    # allow_physical_reset=False (water meters), this layer must catch and
+    # self-heal it with no manual intervention.
+    values = [135.94, 135.99, 0.006, 136.02, 136.07]
+    invalid_indices: list[int] = []
+    sums = compute_reset_compensated_sums(
+        values, allow_physical_reset=False, invalid_indices=invalid_indices
+    )
+    assert invalid_indices == [2]  # only the glitched reading is rejected
+    # No collapse in the compensated running total across the glitch.
+    assert all(later >= earlier for earlier, later in zip(sums, sums[1:]))
+    # The glitched period itself contributes zero consumption...
+    assert sums[2] == sums[1]
+    # ...and the very next, genuinely-valid reading resumes a normal, small
+    # delta from the correct pre-glitch baseline (136.02 - 135.99 = 0.03),
+    # not a ~136 spike from being diffed against the rejected 0.006 value.
+    assert sums[3] - sums[2] == pytest.approx(136.02 - 135.99)
+
+
+def test_allow_physical_reset_true_default_unaffected_by_new_parameter():
+    # Default behavior (heat meters, and every existing caller/test in this
+    # file) must stay byte-for-byte identical to before this parameter was
+    # introduced.
+    values = [100.0, 130.0, 145.0]
+    assert compute_reset_compensated_sums(values) == [0.0, 30.0, 45.0]
+    assert compute_reset_compensated_sums(values, allow_physical_reset=True) == [0.0, 30.0, 45.0]
+
+
 def test_compute_monthly_summary_for_year_month_boundary_rows_no_off_by_one():
     # Rows exactly on month-start boundaries (as HA's own "month" period rows
     # are, per the recorder source) must attribute each delta to exactly one

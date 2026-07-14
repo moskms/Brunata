@@ -25,6 +25,7 @@ from .brunata_client.models import MeterReading
 from . import debug_export, statistics
 from .const import (
     ALLOCATION_UNIT_SLUGS,
+    ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET,
     CONF_HISTORY_IMPORTED,
     DOMAIN,
     UPDATE_INTERVAL,
@@ -157,6 +158,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
                 name=f"Brunata {name}",
                 points=result.points,
                 scale=scale,
+                allow_physical_reset=allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET,
             )
 
         self.hass.config_entries.async_update_entry(

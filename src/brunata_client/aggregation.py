@@ -12,9 +12,13 @@ homeassistant.components.recorder.statistics.statistics_during_period().
 _RESET_THRESHOLD = 0.9  # matches HA's own total_increasing reset detection
 
 
-def compute_reset_compensated_sums(values: list[float]) -> list[float]:
-    """Chronological raw (possibly physically-resetting) cumulative readings
-    -> a monotonically increasing running total, one output per input value.
+def compute_reset_compensated_sums(
+    values: list[float],
+    allow_physical_reset: bool = True,
+    invalid_indices: list[int] | None = None,
+) -> list[float]:
+    """Chronological raw cumulative readings -> a monotonically increasing
+    running total, one output per input value.
 
     Mirrors HA's own state_class=total_increasing statistics compiler
     (homeassistant/components/sensor/recorder.py's reset_detected(): a value
@@ -24,19 +28,50 @@ def compute_reset_compensated_sums(values: list[float]) -> list[float]:
     backfill (statistics.py's _bucket_by_hour) — HA's live recorder already
     does this automatically for ongoing polling, since that goes through the
     sensor's own state_class-aware compiler; the bulk import bypasses it.
+
+    `allow_physical_reset` (default True, preserving the original behavior
+    above) distinguishes meters that can genuinely reset their physical
+    counter (heat/radiator meters — a real, confirmed case) from ones that
+    cannot (water meters — confirmed project knowledge: a water meter's
+    cumulative total never legitimately falls). When False, a drop below the
+    threshold is NOT treated as a new reset cycle: it's invalid data (a
+    generalized, meter-type-agnostic validation layer — confirmed real case:
+    HA's own compiled recorder "sum" column collapsing with no last_reset set
+    on 2026-07-13, an artifact unrelated to any real physical reset). The
+    running total is instead frozen at its last known-valid value, so the
+    invalid reading contributes exactly zero consumption rather than a
+    guessed, interpolated, or negative number — and, critically, later
+    readings are still diffed against that last known-valid value, not the
+    invalid one, so a single bad reading can't cascade into a false spike on
+    the next period either. See README's "Kendte begrænsninger" section.
+
+    When `invalid_indices` is passed (a list), the index of every value
+    rejected this way is appended to it, so a caller with logging access
+    (statistics.py) can report exactly which readings were rejected and why.
     """
     running_sum = 0.0
-    previous: float | None = None
+    last_valid: float | None = None
     result = []
-    for value in values:
-        if previous is None:
-            pass  # first ever point: nothing to diff against yet
-        elif value < previous * _RESET_THRESHOLD:
-            running_sum += value  # reset: new cycle contributes from its own 0
+    for index, value in enumerate(values):
+        if last_valid is None:
+            last_valid = value  # first ever point: nothing to diff against yet
+        elif value < last_valid * _RESET_THRESHOLD:
+            if allow_physical_reset:
+                running_sum += value  # reset: new cycle contributes from its own 0
+                last_valid = value
+            else:
+                if invalid_indices is not None:
+                    invalid_indices.append(index)
+                # Invalid data, not a real reset: freeze at the last known-
+                # valid value. last_valid deliberately NOT updated here, so
+                # the next reading's delta is still computed against the
+                # correct baseline instead of this bad one.
+                result.append(running_sum)
+                continue
         else:
-            running_sum += value - previous
+            running_sum += value - last_valid
+            last_valid = value
         result.append(running_sum)
-        previous = value
     return result
 
 

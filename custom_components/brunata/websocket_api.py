@@ -79,16 +79,23 @@ async def ws_list_meters(hass: HomeAssistant, connection, msg) -> None:
 )
 @websocket_api.async_response
 async def ws_monthly_summary(hass: HomeAssistant, connection, msg) -> None:
-    resolved = _resolve_meter(hass, msg["meter_id"])
+    meter_id = msg["meter_id"]
+    resolved = _resolve_meter(hass, meter_id)
     if resolved is None:
-        connection.send_error(msg["id"], "not_found", f"Unknown meter_id {msg['meter_id']}")
+        connection.send_error(msg["id"], "not_found", f"Unknown meter_id {meter_id}")
         return
-    entity_id, _meter = resolved
-    result = await statistics.async_get_monthly_summary(hass, entity_id, msg.get("year"))
+    entity_id, meter = resolved
+    result = await statistics.async_get_monthly_summary(
+        hass,
+        entity_id,
+        msg.get("year"),
+        mounting_date=meter.get("mountingDate"),
+        allocation_unit=meter.get("allocationUnit"),
+    )
     # Included so the frontend card can show heat consumption in raw
     # "enheder" instead of kWh in the monthly table only (None for water
     # meters, which have no scale factor).
-    result["scale"] = _scale_for_meter(hass, msg["meter_id"])
+    result["scale"] = _scale_for_meter(hass, meter_id)
     connection.send_result(msg["id"], result)
 
 
@@ -106,8 +113,10 @@ async def ws_daily_breakdown(hass: HomeAssistant, connection, msg) -> None:
     if resolved is None:
         connection.send_error(msg["id"], "not_found", f"Unknown meter_id {msg['meter_id']}")
         return
-    entity_id, _meter = resolved
-    result = await statistics.async_get_daily_breakdown(hass, entity_id, msg["year"], msg["month"])
+    entity_id, meter = resolved
+    result = await statistics.async_get_daily_breakdown(
+        hass, entity_id, msg["year"], msg["month"], allocation_unit=meter.get("allocationUnit")
+    )
     connection.send_result(msg["id"], result)
 
 
