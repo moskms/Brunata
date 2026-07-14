@@ -20,6 +20,15 @@ CONF_HISTORY_IMPORTED = "history_imported"
 ALLOCATION_UNIT_SLUGS = {"O": "varme", "W": "varmt_vand", "K": "koldt_vand"}
 ALLOCATION_UNIT_NAMES = {"O": "Varme", "W": "Varmt vand", "K": "Koldt vand"}
 
+# allocationUnit values whose physical counter can genuinely reset to ~0
+# (confirmed real case: a heat/radiator meter's cumulative value). Water
+# meters ("W", "K") never legitimately reset — confirmed project knowledge —
+# so any drop in their readings is data-quality noise, not consumption, and
+# is validated/clamped accordingly (see aggregation.py's
+# compute_reset_compensated_sums `allow_physical_reset` and README's "Kendte
+# begrænsninger").
+ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET = {"O"}
+
 
 def build_meter_naming(active_meters: list[dict]) -> dict[int, tuple[str, str]]:
     """meterId -> (entity object_id, display name), for one active meter per entry.

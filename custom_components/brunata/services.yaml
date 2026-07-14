@@ -1,0 +1,45 @@
+# Permanent diagnosticeringsværktøj — se services.py. Ikke en del af normal drift.
+export_meter_data:
+  name: Brunata — Eksportér rå målerdata (debug)
+  description: >-
+    Diagnosticeringsværktøj. Henter statistics_during_period() direkte for én
+    entity i et givet datointerval — helt uafhængigt af dashboard-kortet — og
+    skriver det RÅ resultat til /config/brunata_debug_query.json (overskrives
+    hver gang). Bruges manuelt til fejlsøgning, ikke af integrationen selv.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: >-
+        Den fulde entity_id, fx sensor.brunata_varmt_vand_entre — ikke et
+        meter_id, og ikke navnet ("Varmt vand Entre").
+      required: true
+      example: "sensor.brunata_varmt_vand_entre"
+      selector:
+        text:
+    start_date:
+      name: Startdato
+      description: Startdato for intervallet (inklusiv), format ÅÅÅÅ-MM-DD.
+      required: true
+      example: "2026-07-01"
+      selector:
+        text:
+    end_date:
+      name: Slutdato
+      description: Slutdato for intervallet (eksklusiv), format ÅÅÅÅ-MM-DD.
+      required: true
+      example: "2026-08-01"
+      selector:
+        text:
+    period:
+      name: Periode
+      description: Samme "period"-parameter som statistics_during_period() selv bruger.
+      required: false
+      default: month
+      selector:
+        select:
+          options:
+            - "5minute"
+            - "hour"
+            - "day"
+            - "week"
+            - "month"

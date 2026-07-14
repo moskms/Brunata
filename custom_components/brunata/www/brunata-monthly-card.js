@@ -52,6 +52,15 @@ function formatConsumption(value, unit) {
   return unit === "enheder" ? formatted : `${formatted} ${unit}`;
 }
 
+/** True only for the real, current calendar month (today's date) — not based
+ * on whether data exists, so a genuine data gap in a past month is never
+ * mistaken for "this month is still in progress", and vice versa.
+ */
+function isCurrentCalendarMonth(year, month) {
+  const now = new Date();
+  return year === now.getFullYear() && month === now.getMonth() + 1;
+}
+
 function formatYoy(yoyPercent) {
   if (yoyPercent === null || yoyPercent === undefined) {
     return { text: "—", color: null };
@@ -189,6 +198,15 @@ class BrunataMonthlyCard extends HTMLElement {
     const unitTypes = Object.keys(groups).sort(
       (a, b) => (GROUP_ORDER[a] ?? 99) - (GROUP_ORDER[b] ?? 99)
     );
+
+    // Build all column skeletons (DOM structure + year-dropdown wiring)
+    // synchronously first, so the layout appears immediately — then load
+    // each meter's actual data ONE AT A TIME below, rather than firing all
+    // monthly_summary calls at once. Serialized deliberately: performance is
+    // irrelevant for a handful of quick metadata calls, and this removes any
+    // possibility of concurrent calls interfering with each other at the
+    // source, instead of chasing a hard-to-reproduce race condition.
+    const pendingLoads = [];
     for (const unitType of unitTypes) {
       const groupEl = document.createElement("div");
       groupEl.className = "brunata-group";
@@ -197,13 +215,19 @@ class BrunataMonthlyCard extends HTMLElement {
       groupEl.appendChild(heading);
 
       for (const meter of groups[unitType]) {
-        groupEl.appendChild(this._buildMeterColumn(meter));
+        const { columnEl, list, yearSelect } = this._buildMeterColumnSkeleton(meter);
+        groupEl.appendChild(columnEl);
+        pendingLoads.push({ meter, list, yearSelect });
       }
       container.appendChild(groupEl);
     }
+
+    for (const { meter, list, yearSelect } of pendingLoads) {
+      await this._loadYear(meter, list, yearSelect, null);
+    }
   }
 
-  _buildMeterColumn(meter) {
+  _buildMeterColumnSkeleton(meter) {
     const columnEl = document.createElement("div");
     columnEl.className = "brunata-meter-column";
 
@@ -227,14 +251,13 @@ class BrunataMonthlyCard extends HTMLElement {
     list.textContent = "Indlæser…";
     columnEl.appendChild(list);
 
+    // Year changes are individual, user-triggered, one-at-a-time actions —
+    // no serialization needed here, only for the initial burst of loads.
     yearSelect.addEventListener("change", () =>
       this._loadYear(meter, list, yearSelect, parseInt(yearSelect.value, 10))
     );
 
-    // Initial load: no year -> backend defaults to the most recent one.
-    this._loadYear(meter, list, yearSelect, null);
-
-    return columnEl;
+    return { columnEl, list, yearSelect };
   }
 
   async _loadYear(meter, listEl, yearSelect, year) {
@@ -291,7 +314,24 @@ class BrunataMonthlyCard extends HTMLElement {
 
       const valueEl = document.createElement("span");
       valueEl.className = "brunata-month-value";
-      valueEl.textContent = formatConsumption(toDisplay(row.consumption), unit);
+
+      // Distinguish "this calendar month, still in progress" from a genuine
+      // data gap in a past month — both currently show consumption=null
+      // (the reset-guard in aggregation.py can't tell "meter reset" from "no
+      // next-period row yet" from sum alone), but they mean very different
+      // things to the user. The reset-guard logic itself is untouched — this
+      // only changes how a null result is PRESENTED for the current month.
+      const isOngoing = row.consumption === null && isCurrentCalendarMonth(summary.year, row.month);
+      if (isOngoing) {
+        valueEl.textContent = "— ";
+        const ongoingLabel = document.createElement("span");
+        ongoingLabel.className = "brunata-month-ongoing-label";
+        ongoingLabel.textContent = "(i gang)";
+        ongoingLabel.title = "Denne måned er ikke afsluttet endnu — ikke manglende data";
+        valueEl.appendChild(ongoingLabel);
+      } else {
+        valueEl.textContent = formatConsumption(toDisplay(row.consumption), unit);
+      }
 
       const yoy = formatYoy(row.yoy_percent);
       const yoyEl = document.createElement("span");
@@ -305,6 +345,8 @@ class BrunataMonthlyCard extends HTMLElement {
         rowEl.addEventListener("click", () =>
           this._toggleDaily(meter, summary.year, row, rowEl, unit, isHeat ? summary.scale : null)
         );
+      } else if (isOngoing) {
+        rowEl.classList.add("brunata-month-row-ongoing");
       } else {
         rowEl.classList.add("brunata-month-row-disabled");
       }
@@ -462,6 +504,16 @@ class BrunataMonthlyCard extends HTMLElement {
         .brunata-month-row:hover { background: var(--secondary-background-color); }
         .brunata-month-row.active { background: var(--secondary-background-color); font-weight: 600; }
         .brunata-month-row-disabled { cursor: default; opacity: 0.6; }
+        /* Deliberately distinct from .brunata-month-row-disabled above (which
+           is for genuine data gaps) — the current month isn't "missing" data,
+           it just isn't finished yet. Italic + accent color instead of the
+           plain dimmed/greyed treatment used for real gaps. */
+        .brunata-month-row-ongoing { cursor: default; }
+        .brunata-month-row-ongoing .brunata-month-value { font-style: italic; }
+        .brunata-month-ongoing-label {
+          font-style: italic; opacity: 0.8; margin-left: 4px;
+          color: var(--info-color, #039be5);
+        }
         .brunata-month-name { min-width: 6em; }
         .brunata-month-value { text-align: right; white-space: nowrap; }
         .brunata-month-yoy { min-width: 3.5em; text-align: right; white-space: nowrap; }
