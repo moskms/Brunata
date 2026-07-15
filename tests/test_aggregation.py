@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -8,6 +8,7 @@ from brunata_client.aggregation import (
     compute_monthly_summary_for_year,
     compute_period_deltas,
     compute_reset_compensated_sums,
+    compute_rolling_window_total,
 )
 
 
@@ -391,3 +392,97 @@ def test_compute_monthly_summary_for_year_month_boundary_rows_no_off_by_one():
     assert by_month[8] == pytest.approx(55.0)
     # May has no data of its own here (its row only serves as June's baseline).
     assert by_month[5] is None
+
+
+# ---------------------------------------------------------------------------
+# compute_rolling_window_total — "Sidste 30 dage" summary (mirrors Brunata's
+# own portal cards), shown above the individual meters in the dashboard card.
+# ---------------------------------------------------------------------------
+
+
+def _daily_rows(start_day: date, num_days: int, daily_consumption: float) -> list[dict]:
+    """[{"start": datetime, "sum": float}, ...] for num_days consecutive days
+    starting at start_day, each contributing exactly daily_consumption, plus
+    one baseline day before start_day (so the first real day's delta is
+    computable) — the same shape statistics.py's _normalize_state_rows hands
+    to compute_daily_breakdown/compute_rolling_window_total in practice.
+    """
+    return [
+        {
+            "start": datetime(start_day.year, start_day.month, start_day.day) + timedelta(days=i - 1),
+            "sum": i * daily_consumption,
+        }
+        for i in range(num_days + 1)
+    ]
+
+
+def test_compute_rolling_window_total_basic_30_days():
+    as_of = date(2026, 7, 15)
+    # Window ends the day BEFORE as_of (2026-07-14, since the 15th itself is
+    # still in progress) — 30 real days (plus one baseline day) ending there.
+    rows = _daily_rows(as_of - timedelta(days=30), 30, 1.0)
+    result = compute_rolling_window_total(rows, as_of, window_days=30)
+    assert result["total"] == pytest.approx(30.0)
+    assert result["diff_from_last_year"] is None  # no data a year earlier at all
+
+
+def test_compute_rolling_window_total_excludes_as_of_day_itself():
+    # A reading dated as_of itself (today, still in progress) must NOT be
+    # counted in the window — only through as_of - 1 day.
+    as_of = date(2026, 7, 15)
+    rows = _daily_rows(as_of - timedelta(days=30), 30, 1.0)
+    # Add one more day landing on as_of itself, with a large jump that would
+    # be very obviously wrong if it were included.
+    rows.append({"start": datetime(as_of.year, as_of.month, as_of.day), "sum": rows[-1]["sum"] + 1000.0})
+    result = compute_rolling_window_total(rows, as_of, window_days=30)
+    assert result["total"] == pytest.approx(30.0)  # unaffected by the as_of-dated row
+
+
+def test_compute_rolling_window_total_diff_from_last_year():
+    as_of = date(2026, 7, 15)
+    window_end = as_of - timedelta(days=1)
+    window_start = window_end - timedelta(days=29)
+    last_year_window_end = window_end - timedelta(days=365)
+    last_year_window_start = last_year_window_end - timedelta(days=29)
+
+    # This year's window: 30 days at 2.0/day = 60. Last year's window: 30
+    # days at 1.5/day = 45. diff_from_last_year should be 60 - 45 = 15.
+    rows = _daily_rows(last_year_window_start, 30, 1.5) + _daily_rows(window_start, 30, 2.0)
+    result = compute_rolling_window_total(rows, as_of, window_days=30)
+    assert result["total"] == pytest.approx(60.0)
+    assert result["diff_from_last_year"] == pytest.approx(15.0)
+
+
+def test_compute_rolling_window_total_no_data_at_all_is_none():
+    result = compute_rolling_window_total([], date(2026, 7, 15), window_days=30)
+    assert result == {"total": None, "diff_from_last_year": None}
+
+
+def test_compute_rolling_window_total_partial_window_still_sums_available_days():
+    as_of = date(2026, 7, 15)
+    # Meter only has 10 days of history within the 30-day window (e.g. newly
+    # mounted) — must still report a real total from what IS available,
+    # not None.
+    rows = _daily_rows(as_of - timedelta(days=10), 10, 1.0)
+    result = compute_rolling_window_total(rows, as_of, window_days=30)
+    assert result["total"] == pytest.approx(10.0)
+
+
+def test_compute_rolling_window_total_immune_to_invalid_reading_in_window():
+    # A rejected/invalid reading (already clamped to the last known-valid
+    # value by compute_reset_compensated_sums' allow_physical_reset=False
+    # layer, see the July 13 incident) inside the window must not corrupt
+    # the 30-day total: the frozen day itself shows zero consumption, but
+    # since the day after it reflects the meter's true, unaffected
+    # cumulative reading, its delta (computed against the correct last-
+    # valid baseline) naturally absorbs whatever the frozen day "lost" — no
+    # consumption is permanently dropped from the window, only reattributed
+    # to a different day within it.
+    as_of = date(2026, 7, 15)
+    rows = _daily_rows(as_of - timedelta(days=30), 30, 1.0)
+    # Simulate day 13 being flagged invalid and frozen (sum stays flat for
+    # one day instead of advancing by 1.0) — day 14 onward keep their real,
+    # unaffected values.
+    rows[13]["sum"] = rows[12]["sum"]
+    result = compute_rolling_window_total(rows, as_of, window_days=30)
+    assert result["total"] == pytest.approx(30.0)  # nothing lost over the full window
