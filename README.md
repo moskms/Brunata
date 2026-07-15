@@ -20,6 +20,12 @@ som sensorer i Home Assistant — inklusive automatisk import af historisk forbr
   Assistant long-term statistics, så graferne er fyldt med det samme i stedet for at starte fra nul.
 - **Timelig opdatering** af de aktuelle værdier efter opsætning (Brunata-målere rapporterer typisk
   ikke oftere end det alligevel).
+- **Måned/dag-forbrugskort** (`custom:brunata-monthly-card`) med år-til-år-sammenligning pr. måned,
+  klik-for-at-udvide dagligt forbrug, og en **"Sidste 30 dage"-oversigt** øverst for hver måler —
+  summeret forbrug for de seneste 30 hele dage (dags dato selv tælles ikke med, da den dag endnu
+  ikke er afsluttet), plus forskellen i forhold til samme periode sidste år. Tallene er beregnet
+  til at kunne krydstjekkes direkte mod de tilsvarende "Sidste 30 dage"-kort på Brunatas egen
+  portal. Se afsnittet ["Dashboard"](#dashboard) nedenfor for opsætning.
 
 ## Krav
 
@@ -118,6 +124,12 @@ cards:
 ```
 
 Udelad de af de tre `custom:brunata-monthly-card`-blokke, du ikke har en måler af typen for.
+
+Hver måler får automatisk en **"Sidste 30 dage"**-boks øverst i sin egen kolonne, over
+månedstabellen — et rullende 30-dages forbrugstal (i stedet for et kalendermånedstal) plus
+forskellen til samme periode sidste år, ligesom Brunatas egen portals forside. Vandmålernes tal
+vises her med 3 decimaler (i stedet for månedstabellens 2), så de er nemme at sammenligne 1:1 med
+tallene på Brunatas portal.
 
 ## Kendte begrænsninger
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.components.logbook import async_log_entry
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -54,6 +55,33 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
         # can change over time (meters added/dismounted) without a reload.
         self.active_meters: list[dict] = []
 
+    def _log_activity(self, message: str) -> None:
+        """Write one line to this device's Activity tab, so it's visible at a
+        glance whether the integration is actually still polling Brunata —
+        rather than a silent "no new data" that could just as easily be a
+        dead polling loop (see this project's 2026-07-13 recorder
+        investigation, where confirming polling was even happening was a
+        real, non-obvious debugging step).
+
+        logbook.async_log_entry is a synchronous @callback despite its
+        "async_" prefix (confirmed against HA's own source) — must be
+        called directly, not awaited. Requires an entity_id belonging to
+        this device to associate the entry with it; skipped if no meter is
+        known yet (e.g. the very first poll fails before any meter list has
+        ever been fetched).
+        """
+        if not self.active_meters:
+            return
+        naming = build_meter_naming(self.active_meters)
+        object_id, _name = naming[self.active_meters[0]["meterId"]]
+        async_log_entry(
+            self.hass,
+            name="Brunata",
+            message=message,
+            domain=DOMAIN,
+            entity_id=f"sensor.brunata_{object_id}",
+        )
+
     async def _fetch_active_meters(self) -> list[dict]:
         """GET /consumer/metersforconsumer, filtered to active O/W/K meters.
 
@@ -87,6 +115,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
             consumption = await self._fetch_consumption_with_retry()
             self.active_meters = await self._fetch_active_meters()
         except Exception as err:
+            self._log_activity(f"Kunne ikke hente data fra Brunata Online: {err}")
             raise UpdateFailed(str(err)) from err
 
         readings_by_id = {m.meter_id: m for m in consumption.raw_meters}
@@ -112,6 +141,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
                 )
             result[meter_id] = reading
 
+        self._log_activity(f"Opdaterede data for {len(result)} måler(e) fra Brunata Online")
         return result
 
     async def async_import_history_if_needed(self) -> None:

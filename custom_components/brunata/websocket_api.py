@@ -120,7 +120,35 @@ async def ws_daily_breakdown(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "brunata/rolling_summary",
+        vol.Required("meter_id"): int,
+        vol.Optional("window_days"): int,
+    }
+)
+@websocket_api.async_response
+async def ws_rolling_summary(hass: HomeAssistant, connection, msg) -> None:
+    meter_id = msg["meter_id"]
+    resolved = _resolve_meter(hass, meter_id)
+    if resolved is None:
+        connection.send_error(msg["id"], "not_found", f"Unknown meter_id {meter_id}")
+        return
+    entity_id, meter = resolved
+    result = await statistics.async_get_rolling_summary(
+        hass,
+        entity_id,
+        allocation_unit=meter.get("allocationUnit"),
+        window_days=msg.get("window_days", 30),
+    )
+    # Same reasoning as ws_monthly_summary: lets the frontend show heat's
+    # rolling total in raw "enheder" instead of kWh.
+    result["scale"] = _scale_for_meter(hass, meter_id)
+    connection.send_result(msg["id"], result)
+
+
 def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_meters)
     websocket_api.async_register_command(hass, ws_monthly_summary)
     websocket_api.async_register_command(hass, ws_daily_breakdown)
+    websocket_api.async_register_command(hass, ws_rolling_summary)

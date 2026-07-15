@@ -26,6 +26,7 @@ from .brunata_client.aggregation import (
     compute_daily_breakdown,
     compute_monthly_summary_for_year,
     compute_reset_compensated_sums,
+    compute_rolling_window_total,
 )
 from .brunata_client.history import parse_brunata_datetime
 from .const import ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET
@@ -321,3 +322,32 @@ async def async_get_daily_breakdown(
     allow_physical_reset = allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET
     rows = _normalize_state_rows(raw.get(statistic_id, []), allow_physical_reset, statistic_id)
     return compute_daily_breakdown(rows)
+
+
+async def async_get_rolling_summary(
+    hass: HomeAssistant,
+    statistic_id: str,
+    allocation_unit: str | None = None,
+    window_days: int = 30,
+) -> dict:
+    """Rolling `window_days`-day total consumption, plus the absolute
+    difference from the same window exactly one year earlier — mirrors
+    Brunata's own portal's "Sidste 30 dage" summary cards, shown above the
+    individual meters in the dashboard card. Reuses the same state-based,
+    reset-/invalid-data-validated computation as the monthly/daily views
+    (_normalize_state_rows) — not the recorder's own "sum" column.
+
+    Queries a fixed ~1 year + window_days window ending now, regardless of
+    the meter's mountingDate — a query this size is nowhere near the
+    _MAX_MONTHLY_HISTORY hang risk that motivated capping the monthly view,
+    and a too-young meter simply has fewer real rows in range (handled by
+    compute_rolling_window_total, never an error).
+    """
+    now = dt_util.now()
+    start_time = now - timedelta(days=365 + window_days + 2)
+    raw = await _async_statistics_during_period(
+        hass, start_time, None, {statistic_id}, "day", {"state"}
+    )
+    allow_physical_reset = allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET
+    rows = _normalize_state_rows(raw.get(statistic_id, []), allow_physical_reset, statistic_id)
+    return compute_rolling_window_total(rows, now.date(), window_days)

@@ -8,6 +8,8 @@ supplies the raw rows from
 homeassistant.components.recorder.statistics.statistics_during_period().
 """
 
+from datetime import date, timedelta
+
 
 _RESET_THRESHOLD = 0.9  # matches HA's own total_increasing reset detection
 
@@ -149,6 +151,60 @@ def compute_monthly_summary_for_year(rows: list[dict], year: int) -> dict:
     total_consumption = sum(known) if known else None
 
     return {"year": year, "months": months, "total_consumption": total_consumption}
+
+
+def compute_rolling_window_total(
+    rows: list[dict], as_of: date, window_days: int = 30
+) -> dict:
+    """rows: chronological [{"start": datetime, "sum": float}, ...], one per
+    day, spanning at least `window_days` days up to and including the day
+    before `as_of`, plus (if a year-over-year comparison is wanted) the
+    equivalent `window_days`-day window exactly one year before that.
+
+    Mirrors Brunata's own portal's "Sidste 30 dage" summary cards (rolling
+    N-day total, "sammenlignet med samme periode sidste år") — a separate
+    figure from the calendar month/day breakdown elsewhere in this module,
+    shown above the individual meters in the dashboard card.
+
+    The window ends the day BEFORE `as_of` (typically "today"), not `as_of`
+    itself — `as_of`'s own day is still in progress and its consumption
+    isn't final yet, the same reasoning already applied to the current
+    calendar month elsewhere (see the dashboard card's "i gang" marker). So
+    a 30-day window requested as_of 2026-07-15 covers 2026-06-16 through
+    2026-07-14 inclusive, not through the 15th.
+
+    Returns {"total": float | None, "diff_from_last_year": float | None}.
+    `total` sums whatever days ARE available in the window (a partial/new
+    meter still produces a number), same convention as
+    compute_monthly_summary_for_year's total_consumption. `diff_from_last_year`
+    is `total - last_year_total` — an absolute difference in the same unit,
+    matching Brunata's own portal (not a percentage, unlike the monthly
+    table's yoy_percent) — or None if last year's window has no data at all,
+    never guessed/extrapolated.
+    """
+    deltas = compute_period_deltas(rows)
+
+    window_end = as_of - timedelta(days=1)
+    window_start = window_end - timedelta(days=window_days - 1)
+    last_year_window_end = window_end - timedelta(days=365)
+    last_year_window_start = last_year_window_end - timedelta(days=window_days - 1)
+
+    this_window = [
+        d["consumption"]
+        for d in deltas
+        if window_start <= d["start"].date() <= window_end and d["consumption"] is not None
+    ]
+    last_year_window = [
+        d["consumption"]
+        for d in deltas
+        if last_year_window_start <= d["start"].date() <= last_year_window_end
+        and d["consumption"] is not None
+    ]
+
+    total = sum(this_window) if this_window else None
+    diff_from_last_year = total - sum(last_year_window) if total is not None and last_year_window else None
+
+    return {"total": total, "diff_from_last_year": diff_from_last_year}
 
 
 def compute_daily_breakdown(rows: list[dict]) -> list[dict]:

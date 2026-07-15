@@ -37,11 +37,13 @@ const SUBTITLE_PARTS = {
 };
 const SUBTITLE_ALL = Object.values(SUBTITLE_PARTS).join(" · ");
 
-function formatConsumption(value, unit) {
+function formatConsumption(value, unit, fractionDigits) {
   if (value === null || value === undefined) return "—";
   // Heat ("enheder") is always a whole pulse count — never show decimals for
-  // it, unlike water (m³) which keeps its usual 2 decimals.
-  const fractionDigits = unit === "enheder" ? 0 : 2;
+  // it, unlike water (m³) which keeps its usual 2 decimals by default.
+  // Callers (e.g. the rolling 30-day summary, matched against Brunata's own
+  // portal precision for easy cross-checking) can override this.
+  if (fractionDigits === undefined) fractionDigits = unit === "enheder" ? 0 : 2;
   const formatted = value.toLocaleString("da-DK", {
     maximumFractionDigits: fractionDigits,
     minimumFractionDigits: fractionDigits,
@@ -215,14 +217,18 @@ class BrunataMonthlyCard extends HTMLElement {
       groupEl.appendChild(heading);
 
       for (const meter of groups[unitType]) {
-        const { columnEl, list, yearSelect } = this._buildMeterColumnSkeleton(meter);
+        const { columnEl, list, yearSelect, rollingEl } = this._buildMeterColumnSkeleton(meter);
         groupEl.appendChild(columnEl);
-        pendingLoads.push({ meter, list, yearSelect });
+        pendingLoads.push({ meter, list, yearSelect, rollingEl });
       }
       container.appendChild(groupEl);
     }
 
-    for (const { meter, list, yearSelect } of pendingLoads) {
+    for (const { meter, list, yearSelect, rollingEl } of pendingLoads) {
+      // Same deliberate serialization as the year loads below — one WS call
+      // at a time, in a fixed order, rather than firing every meter's
+      // requests concurrently.
+      await this._loadRollingSummary(meter, rollingEl);
       await this._loadYear(meter, list, yearSelect, null);
     }
   }
@@ -246,6 +252,13 @@ class BrunataMonthlyCard extends HTMLElement {
 
     columnEl.appendChild(header);
 
+    // "Sidste 30 dage" summary — mirrors Brunata's own portal's rolling-
+    // window cards, placed above the calendar month/day breakdown below.
+    const rollingEl = document.createElement("div");
+    rollingEl.className = "brunata-rolling-summary";
+    rollingEl.textContent = "Indlæser…";
+    columnEl.appendChild(rollingEl);
+
     const list = document.createElement("div");
     list.className = "brunata-month-list";
     list.textContent = "Indlæser…";
@@ -257,7 +270,48 @@ class BrunataMonthlyCard extends HTMLElement {
       this._loadYear(meter, list, yearSelect, parseInt(yearSelect.value, 10))
     );
 
-    return { columnEl, list, yearSelect };
+    return { columnEl, list, yearSelect, rollingEl };
+  }
+
+  async _loadRollingSummary(meter, rollingEl) {
+    const summary = await this._hass.callWS({
+      type: "brunata/rolling_summary",
+      meter_id: meter.meter_id,
+    });
+
+    const isHeat = meter.allocation_unit === "O" && summary.scale;
+    const unit = isHeat ? "enheder" : this._unitFor(meter.entity_id);
+    const toDisplay = (value) =>
+      value === null || value === undefined ? null : isHeat ? value / summary.scale : value;
+
+    rollingEl.textContent = "";
+
+    const label = document.createElement("div");
+    label.className = "brunata-rolling-label";
+    label.textContent = "Sidste 30 dage";
+    rollingEl.appendChild(label);
+
+    // 3 decimals for water, matching Brunata's own portal's "Sidste 30
+    // dage" cards precision exactly (e.g. "1,958 m³") — deliberately more
+    // precise than the 2-decimal monthly table, since this box's whole
+    // purpose is letting the user cross-check our number against theirs.
+    const fractionDigits = unit === "enheder" ? 0 : 3;
+
+    const valueEl = document.createElement("div");
+    valueEl.className = "brunata-rolling-value";
+    valueEl.textContent = formatConsumption(toDisplay(summary.total), unit, fractionDigits);
+    rollingEl.appendChild(valueEl);
+
+    const diff = toDisplay(summary.diff_from_last_year);
+    if (diff !== null) {
+      const diffEl = document.createElement("div");
+      diffEl.className = "brunata-rolling-diff";
+      const arrow = diff > 0 ? "↗" : diff < 0 ? "↘" : "→";
+      const sign = diff > 0 ? "+" : "";
+      diffEl.textContent =
+        `${arrow} ${sign}${formatConsumption(diff, unit, fractionDigits)} ift. samme periode sidste år`;
+      rollingEl.appendChild(diffEl);
+    }
   }
 
   async _loadYear(meter, listEl, yearSelect, year) {
@@ -493,6 +547,13 @@ class BrunataMonthlyCard extends HTMLElement {
           gap: 8px; margin-bottom: 4px;
         }
         .brunata-meter-label { font-weight: 500; opacity: 0.8; }
+        .brunata-rolling-summary {
+          background: var(--secondary-background-color); border-radius: 8px;
+          padding: 8px 12px; margin-bottom: 12px;
+        }
+        .brunata-rolling-label { font-size: 0.85em; opacity: 0.7; }
+        .brunata-rolling-value { font-size: 1.4em; font-weight: 600; }
+        .brunata-rolling-diff { font-size: 0.8em; opacity: 0.7; margin-top: 2px; }
         .brunata-year-select {
           font: inherit; color: inherit; background: var(--card-background-color);
           border: 1px solid var(--divider-color); border-radius: 4px; padding: 2px 4px;
