@@ -192,10 +192,15 @@ class BrunataMonthlyCard extends HTMLElement {
     }
 
     const container = this._root.querySelector(".brunata-groups");
+    const rollingContainer = this._root.querySelector(".brunata-rolling-groups");
     // Skip the 3-group grid layout entirely when filtered to one type, so
-    // that one group fills the card's full width instead.
-    container.classList.toggle("brunata-groups--single", Boolean(this._filterAllocationUnit));
+    // that one group fills the card's full width instead. Both grids share
+    // the same column layout, so they're toggled/cleared identically.
+    const isSingle = Boolean(this._filterAllocationUnit);
+    container.classList.toggle("brunata-groups--single", isSingle);
+    rollingContainer.classList.toggle("brunata-groups--single", isSingle);
     container.innerHTML = "";
+    rollingContainer.innerHTML = "";
 
     const unitTypes = Object.keys(groups).sort(
       (a, b) => (GROUP_ORDER[a] ?? 99) - (GROUP_ORDER[b] ?? 99)
@@ -216,12 +221,24 @@ class BrunataMonthlyCard extends HTMLElement {
       heading.textContent = GROUP_LABELS[unitType] || unitType;
       groupEl.appendChild(heading);
 
+      // Mirrors groupEl's position (same "brunata-group" grid-column rules
+      // apply to both grids) but holds only the rolling-summary boxes, one
+      // per meter in this group, stacked in the same order as the meter
+      // columns below.
+      const rollingGroupEl = document.createElement("div");
+      rollingGroupEl.className = "brunata-group";
+
       for (const meter of groups[unitType]) {
-        const { columnEl, list, yearSelect, rollingEl } = this._buildMeterColumnSkeleton(meter);
+        const { columnEl, list, yearSelect } = this._buildMeterColumnSkeleton(meter);
         groupEl.appendChild(columnEl);
+
+        const rollingEl = this._buildRollingSummarySkeleton();
+        rollingGroupEl.appendChild(rollingEl);
+
         pendingLoads.push({ meter, list, yearSelect, rollingEl });
       }
       container.appendChild(groupEl);
+      rollingContainer.appendChild(rollingGroupEl);
     }
 
     for (const { meter, list, yearSelect, rollingEl } of pendingLoads) {
@@ -252,13 +269,6 @@ class BrunataMonthlyCard extends HTMLElement {
 
     columnEl.appendChild(header);
 
-    // "Sidste 30 dage" summary — mirrors Brunata's own portal's rolling-
-    // window cards, placed above the calendar month/day breakdown below.
-    const rollingEl = document.createElement("div");
-    rollingEl.className = "brunata-rolling-summary";
-    rollingEl.textContent = "Indlæser…";
-    columnEl.appendChild(rollingEl);
-
     const list = document.createElement("div");
     list.className = "brunata-month-list";
     list.textContent = "Indlæser…";
@@ -270,7 +280,19 @@ class BrunataMonthlyCard extends HTMLElement {
       this._loadYear(meter, list, yearSelect, parseInt(yearSelect.value, 10))
     );
 
-    return { columnEl, list, yearSelect, rollingEl };
+    return { columnEl, list, yearSelect };
+  }
+
+  /** "Forbrug sidste 30 dage" summary box — mirrors Brunata's own portal's
+   * rolling-window cards. Deliberately its own top-level row above the
+   * meter tables (not nested inside each meter's own column) so it reads as
+   * a distinct summary section, matching Brunata's own layout.
+   */
+  _buildRollingSummarySkeleton() {
+    const rollingEl = document.createElement("div");
+    rollingEl.className = "brunata-rolling-summary";
+    rollingEl.textContent = "Indlæser…";
+    return rollingEl;
   }
 
   async _loadRollingSummary(meter, rollingEl) {
@@ -286,10 +308,15 @@ class BrunataMonthlyCard extends HTMLElement {
 
     rollingEl.textContent = "";
 
-    const label = document.createElement("div");
+    // Label and value share one row (label left, value right) — matching
+    // the table rows/Total row below, and Brunata's own portal layout.
+    const mainRow = document.createElement("div");
+    mainRow.className = "brunata-rolling-main";
+
+    const label = document.createElement("span");
     label.className = "brunata-rolling-label";
-    label.textContent = "Sidste 30 dage";
-    rollingEl.appendChild(label);
+    label.textContent = "Forbrug sidste 30 dage";
+    mainRow.appendChild(label);
 
     // 3 decimals for water, matching Brunata's own portal's "Sidste 30
     // dage" cards precision exactly (e.g. "1,958 m³") — deliberately more
@@ -297,10 +324,12 @@ class BrunataMonthlyCard extends HTMLElement {
     // purpose is letting the user cross-check our number against theirs.
     const fractionDigits = unit === "enheder" ? 0 : 3;
 
-    const valueEl = document.createElement("div");
+    const valueEl = document.createElement("span");
     valueEl.className = "brunata-rolling-value";
     valueEl.textContent = formatConsumption(toDisplay(summary.total), unit, fractionDigits);
-    rollingEl.appendChild(valueEl);
+    mainRow.appendChild(valueEl);
+
+    rollingEl.appendChild(mainRow);
 
     const diff = toDisplay(summary.diff_from_last_year);
     if (diff !== null) {
@@ -528,6 +557,17 @@ class BrunataMonthlyCard extends HTMLElement {
         .brunata-group:nth-child(1) { grid-column: 1; }
         .brunata-group:nth-child(2) { grid-column: 3; }
         .brunata-group:nth-child(3) { grid-column: 5; }
+        /* "Forbrug sidste 30 dage" boxes — a separate row above the meter
+           tables (not nested inside each meter's own column), mirroring
+           Brunata's own portal layout. Shares .brunata-groups' exact column
+           grid/placement rules above so a box always lines up with the
+           table column it belongs to. */
+        .brunata-rolling-groups {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+          margin-bottom: 20px;
+        }
+        .brunata-rolling-groups.brunata-groups--single { display: block; }
         .brunata-detail-panel {
           /* flex-grow/shrink both allowed (unlike the old fixed 0 0 360px):
              shares space with the table when there's room, and — combined
@@ -541,19 +581,26 @@ class BrunataMonthlyCard extends HTMLElement {
         .brunata-detail-meter { font-size: 0.85em; opacity: 0.7; }
         .brunata-detail-title { font-weight: 600; }
         .brunata-group h3 { margin: 0 0 8px 0; }
-        .brunata-meter-column { margin-bottom: 16px; }
+        .brunata-meter-column {
+          margin-bottom: 16px;
+          border: 1px solid var(--divider-color); border-radius: 8px; padding: 12px;
+        }
         .brunata-meter-header {
           display: flex; align-items: center; justify-content: space-between;
           gap: 8px; margin-bottom: 4px;
         }
         .brunata-meter-label { font-weight: 500; opacity: 0.8; }
         .brunata-rolling-summary {
-          background: var(--secondary-background-color); border-radius: 8px;
-          padding: 8px 12px; margin-bottom: 12px;
+          background: var(--card-background-color);
+          border: 1px solid var(--divider-color); border-radius: 8px;
+          padding: 10px 14px; margin-bottom: 8px;
         }
-        .brunata-rolling-label { font-size: 0.85em; opacity: 0.7; }
-        .brunata-rolling-value { font-size: 1.4em; font-weight: 600; }
-        .brunata-rolling-diff { font-size: 0.8em; opacity: 0.7; margin-top: 2px; }
+        .brunata-rolling-main {
+          display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+        }
+        .brunata-rolling-label { font-weight: 500; }
+        .brunata-rolling-value { font-size: 1.2em; font-weight: 600; white-space: nowrap; }
+        .brunata-rolling-diff { font-size: 0.8em; opacity: 0.7; margin-top: 4px; }
         .brunata-year-select {
           font: inherit; color: inherit; background: var(--card-background-color);
           border: 1px solid var(--divider-color); border-radius: 4px; padding: 2px 4px;
@@ -595,6 +642,7 @@ class BrunataMonthlyCard extends HTMLElement {
       <ha-card ${showTitle ? 'header="Forbrug"' : ""}>
         <div class="brunata-subtitle">${subtitleText}</div>
         <div class="brunata-loading">Indlæser målere…</div>
+        <div class="brunata-rolling-groups"></div>
         <div class="brunata-layout">
           <div class="brunata-groups"></div>
           <div class="brunata-detail-panel" hidden>
