@@ -29,8 +29,9 @@ som sensorer i Home Assistant — inklusive automatisk import af historisk forbr
 
 ## Krav
 
-- Home Assistant 2024.x eller nyere (bruger `homeassistant.components.recorder.statistics` til
-  historik-import).
+- Home Assistant 2024.9 eller nyere (bruger `homeassistant.components.recorder.statistics` til
+  historik-import, samt "sections"-visningsstrategien og `type: heading`-kortet til det
+  automatisk oprettede dashboard — se ["Dashboard"](#dashboard) nedenfor).
 - En aktiv Brunata Online-konto med adgang til `online.brunata.com`.
 - Internetadgang fra din Home Assistant-installation (`iot_class: cloud_polling`).
 
@@ -101,29 +102,56 @@ prioritet end at bevare manuelle tilpasninger her, så du ikke efterlades med et
 peger på en integration, der ikke længere er installeret. Har du **flere** Brunata-konti opsat,
 bliver dashboardet stående indtil du fjerner den allersidste af dem.
 
+**Opdaterer du fra en ældre version af integrationen?** Da dashboardet aldrig genskrives, når det
+først findes (se ovenfor), beholder et allerede oprettet "Brunata"-dashboard sit gamle layout, selv
+efter du opdaterer selve integrationen — herunder den ældre, flade `cards:`-struktur fra før
+"sections"-visningen blev indført (se nedenfor), hvor titlen kunne ende i samme kolonne som en af
+målersektionerne og gøre netop den kolonne højere end de andre to. For at få det nye layout skal du
+enten slette det eksisterende "Brunata"-dashboard (Indstillinger → Dashboards → "⋮" → Slet) og
+genindlæse integrationen (Indstillinger → Enheder og tjenester → Brunata → "⋮" → Genindlæs — **ikke**
+fjern/geninstallér, det udløser en unødvendig fuld historik-genimport), eller blot indsætte den
+nye YAML fra afsnittet nedenfor direkte i dit eksisterende dashboards YAML-redigering.
+
 Opret et nyt dashboard (Indstillinger → Dashboards → Tilføj dashboard → Ny dashboard fra bunden),
 skift til YAML-tilstand, og indsæt:
 
 ```yaml
 title: Brunata
 path: brunata
-cards:
-  - type: markdown
-    content: "# Forbrug"
-  - type: markdown
-    content: "**Varme** måles i enheder · **Varmt/Koldt vand** måles i m³"
-  - type: custom:brunata-monthly-card
-    meter_type: heat
-    show_title: false
-  - type: custom:brunata-monthly-card
-    meter_type: hot_water
-    show_title: false
-  - type: custom:brunata-monthly-card
-    meter_type: cold_water
-    show_title: false
+type: sections
+max_columns: 3
+sections:
+  - type: grid
+    column_span: 3
+    cards:
+      - type: heading
+        heading: Forbrug
+      - type: markdown
+        content: "**Varme** måles i enheder · **Varmt/Koldt vand** måles i m³"
+  - type: grid
+    cards:
+      - type: custom:brunata-monthly-card
+        meter_type: heat
+        show_title: false
+  - type: grid
+    cards:
+      - type: custom:brunata-monthly-card
+        meter_type: hot_water
+        show_title: false
+  - type: grid
+    cards:
+      - type: custom:brunata-monthly-card
+        meter_type: cold_water
+        show_title: false
 ```
 
-Udelad de af de tre `custom:brunata-monthly-card`-blokke, du ikke har en måler af typen for.
+Udelad de af de tre meter-sektioner, du ikke har en måler af typen for — husk samtidig at sænke
+`max_columns` og `column_span` (øverst) med 1 for hver du udelader, så titlen fortsat spænder hele
+bredden. Denne "sections"-baserede struktur (i stedet for en flad `cards`-liste) er bevidst valgt
+frem for den ældre, klassiske masonry-visning: masonry balancerer kort i kolonner efter højde, hvad
+der ellers får titlen til at blande sig ind i én tilfældig målerkolonne og gøre netop den kolonne
+højere end de andre to — "sections" giver titlen sin egen, ægte fuld-bredde række for sig selv, så
+de tre målersektioners bund altid flugter.
 
 Hver måler får automatisk en **"Sidste 30 dage"**-boks øverst i sin egen kolonne, over
 månedstabellen — et rullende 30-dages forbrugstal (i stedet for et kalendermånedstal) plus

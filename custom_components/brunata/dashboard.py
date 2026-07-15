@@ -66,34 +66,64 @@ _METER_TYPES = {"O": "heat", "W": "hot_water", "K": "cold_water"}
 
 
 def _build_views(active_meters: list[dict]) -> list[dict]:
-    """One view: a title, a units-explainer, and one card per meter type
-    actually present — never a hardcoded assumption of exactly three.
+    """One view: a full-width "Forbrug" header, and one same-height section
+    per meter type actually present — never a hardcoded assumption of
+    exactly three.
+
+    Uses the "sections" view strategy (HA 2024.9+) rather than the classic
+    masonry view: masonry auto-balances top-level cards into columns by
+    height, which put the header markdown cards in the same column as
+    whichever meter card happened to land there first — making that one
+    column visibly taller than the other two, with no way in masonry to
+    make an arbitrary card span the full width instead. "sections" fixes
+    this directly: the header lives in its own section with
+    column_span = number of meter sections (a real, dedicated full-width
+    row), and each meter type gets its own single-column section below it —
+    so all meter sections end up the same height (each renders the same
+    fixed Jan-Dec + Total row count regardless of data), and their bottoms
+    line up naturally.
     """
     present_units = {m["allocationUnit"] for m in active_meters}
 
-    cards: list[dict] = [
-        # A plain markdown "# Forbrug" heading rather than HA's newer
-        # dedicated `type: heading` card — markdown cards are supported by
-        # every HA version, avoiding a bet on a more recent, more
-        # version-sensitive card type for something purely cosmetic.
-        {"type": "markdown", "content": "# Forbrug"},
-        {
-            "type": "markdown",
-            "content": "**Varme** måles i enheder · **Varmt/Koldt vand** måles i m³",
-        },
-    ]
+    meter_sections: list[dict] = []
     for allocation_unit in ("O", "W", "K"):
         if allocation_unit not in present_units:
             continue
-        cards.append(
+        meter_sections.append(
             {
-                "type": "custom:brunata-monthly-card",
-                "meter_type": _METER_TYPES[allocation_unit],
-                "show_title": False,
+                "type": "grid",
+                "cards": [
+                    {
+                        "type": "custom:brunata-monthly-card",
+                        "meter_type": _METER_TYPES[allocation_unit],
+                        "show_title": False,
+                    }
+                ],
             }
         )
 
-    return [{"title": "Brunata", "path": _DASHBOARD_URL_PATH, "cards": cards}]
+    column_count = len(meter_sections) or 1
+    header_section = {
+        "type": "grid",
+        "column_span": column_count,
+        "cards": [
+            {"type": "heading", "heading": "Forbrug"},
+            {
+                "type": "markdown",
+                "content": "**Varme** måles i enheder · **Varmt/Koldt vand** måles i m³",
+            },
+        ],
+    }
+
+    return [
+        {
+            "title": "Brunata",
+            "path": _DASHBOARD_URL_PATH,
+            "type": "sections",
+            "max_columns": column_count,
+            "sections": [header_section, *meter_sections],
+        }
+    ]
 
 
 async def async_setup_dashboard(hass: HomeAssistant, active_meters: list[dict]) -> None:
