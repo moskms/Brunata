@@ -263,3 +263,6 @@ Version følger skemaet `1.XX`, hvor `XX` er det samlede antal større, afslutte
   sektionsbund) samt kort-æstetik.
 - **1.13** — WebSocket-subscription til robusthed mod midlertidige forbindelsesfejl ved
   dashboard-åbning.
+- **1.14** — Adaptiv, selvlærende pollings-timing baseret på Brunatas faktiske
+  telegramDate-leveringsmønster (vandmålere pooled, varmemåler separat), samt en ny
+  diagnostisk status-entitet, der retter aktivitetslog-filtreringen fra 1.10.

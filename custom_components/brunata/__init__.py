@@ -63,6 +63,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         coordinator: BrunataDataUpdateCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        coordinator.async_shutdown_adaptive_schedule()
         await coordinator.client.close()
     return unloaded
 
