@@ -54,6 +54,14 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
         # Refreshed every _async_update_data() call — an account's meter list
         # can change over time (meters added/dismounted) without a reload.
         self.active_meters: list[dict] = []
+        # Precomputed once per poll (see _async_compute_summaries) so the
+        # dashboard card can read an already-known-good monthly/rolling
+        # summary instead of depending on a fresh WS round-trip succeeding
+        # at the exact moment the dashboard happens to load. In-memory only
+        # (plain instance attributes, not coordinator.data or an entity
+        # attribute) — never written to the recorder database.
+        self.monthly_summaries: dict[int, dict] = {}
+        self.rolling_summaries: dict[int, dict] = {}
 
     def _log_activity(self, message: str) -> None:
         """Write one line to this device's Activity tab, so it's visible at a
@@ -141,8 +149,61 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
                 )
             result[meter_id] = reading
 
+        try:
+            await self._async_compute_summaries(result)
+        except Exception as err:  # noqa: BLE001 — best-effort precompute, must not break the live poll
+            _LOGGER.warning(
+                "Could not precompute monthly/rolling summaries (%s: %s) — the "
+                "dashboard card will fall back to its on-demand WS calls instead",
+                type(err).__name__, err,
+            )
+
         self._log_activity(f"Opdaterede data for {len(result)} måler(e) fra Brunata Online")
         return result
+
+    async def _async_compute_summaries(self, readings: dict[int, MeterReading]) -> None:
+        """Precompute each active meter's monthly + rolling-30-day summary,
+        the same calculation websocket_api.py's ws_monthly_summary/
+        ws_rolling_summary already do on-demand — reusing the exact same
+        statistics.py functions, just run once per hourly poll instead of
+        once per dashboard load. No extra Brunata API calls: these only read
+        from the recorder's own long-term statistics, already populated by
+        this same poll's regular sensor updates.
+
+        Deliberately best-effort per meter (a comparison to `readings`, this
+        cycle's fresh data, not `self.data`, which the base
+        DataUpdateCoordinator hasn't updated yet at this point in the call).
+        """
+        naming = build_meter_naming(self.active_meters)
+        monthly_summaries: dict[int, dict] = {}
+        rolling_summaries: dict[int, dict] = {}
+
+        for meter in self.active_meters:
+            meter_id = meter["meterId"]
+            naming_entry = naming.get(meter_id)
+            if naming_entry is None:
+                continue
+            object_id, _name = naming_entry
+            entity_id = f"sensor.brunata_{object_id}"
+            allocation_unit = meter["allocationUnit"]
+            reading = readings.get(meter_id)
+            scale = reading.scale if reading else None
+
+            monthly = await statistics.async_get_monthly_summary(
+                self.hass, entity_id, mounting_date=meter.get("mountingDate"),
+                allocation_unit=allocation_unit,
+            )
+            monthly["scale"] = scale
+            monthly_summaries[meter_id] = monthly
+
+            rolling = await statistics.async_get_rolling_summary(
+                self.hass, entity_id, allocation_unit=allocation_unit,
+            )
+            rolling["scale"] = scale
+            rolling_summaries[meter_id] = rolling
+
+        self.monthly_summaries = monthly_summaries
+        self.rolling_summaries = rolling_summaries
 
     async def async_import_history_if_needed(self) -> None:
         """One-time backfill from each meter's mountingDate to first setup.

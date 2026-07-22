@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 
 from . import statistics
 from .const import DOMAIN, build_meter_naming
@@ -51,6 +51,41 @@ def _scale_for_meter(hass: HomeAssistant, meter_id: int) -> float | None:
         if reading is not None:
             return reading.scale
     return None
+
+
+def _build_summaries_snapshot(hass: HomeAssistant) -> dict:
+    """{meter_id (str) -> {"monthly_summary": ..., "rolling_summary": ...}}
+    for every active meter that already has a precomputed summary —
+    coordinator.py's _async_compute_summaries populates these once per
+    hourly poll. A meter absent from this snapshot (e.g. right after a
+    reload, before the coordinator's first refresh) is simply omitted; the
+    card falls back to its existing on-demand ws_monthly_summary/
+    ws_rolling_summary calls for that meter in that case.
+
+    Keys are strings (not int meter_id) because this dict is sent to the
+    frontend as a WS message payload, which round-trips through JSON —
+    keeping this explicit rather than relying on int-keyed dict -> JSON
+    stringification happening implicitly.
+    """
+    meters = _all_active_meters(hass)
+    naming = build_meter_naming(meters)
+    coordinators = list(hass.data.get(DOMAIN, {}).values())
+
+    result: dict[str, dict] = {}
+    for meter in meters:
+        meter_id = meter["meterId"]
+        if naming.get(meter_id) is None:
+            continue
+        for coordinator in coordinators:
+            monthly = coordinator.monthly_summaries.get(meter_id)
+            if monthly is None:
+                continue
+            result[str(meter_id)] = {
+                "monthly_summary": monthly,
+                "rolling_summary": coordinator.rolling_summaries.get(meter_id),
+            }
+            break
+    return result
 
 
 @websocket_api.websocket_command({vol.Required("type"): "brunata/list_meters"})
@@ -147,8 +182,44 @@ async def ws_rolling_summary(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command({vol.Required("type"): "brunata/subscribe_summaries"})
+@websocket_api.async_response
+async def ws_subscribe_summaries(hass: HomeAssistant, connection, msg) -> None:
+    """Push every active meter's precomputed monthly/rolling summary to the
+    frontend immediately on subscribe, and again every time any Brunata
+    coordinator finishes a poll — reusing the same long-lived,
+    auto-reconnecting WS connection the frontend already uses for its own
+    entity-state sync (hass.connection.subscribeMessage on the JS side),
+    instead of a one-shot RPC that fails outright if the connection happens
+    to be mid-reconnect at the exact moment a dashboard loads. That
+    connection-timing failure — not slow computation — was the actual bug
+    this was built to fix; the numbers were always at most an hour stale
+    either way.
+    """
+    @callback
+    def _push() -> None:
+        connection.send_message(
+            websocket_api.event_message(msg["id"], _build_summaries_snapshot(hass))
+        )
+
+    unsubs = [
+        coordinator.async_add_listener(_push)
+        for coordinator in hass.data.get(DOMAIN, {}).values()
+    ]
+
+    @callback
+    def _unsubscribe_all() -> None:
+        for unsub in unsubs:
+            unsub()
+
+    connection.subscriptions[msg["id"]] = _unsubscribe_all
+    connection.send_result(msg["id"])
+    _push()  # current snapshot immediately, don't wait for the next poll
+
+
 def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_meters)
     websocket_api.async_register_command(hass, ws_monthly_summary)
     websocket_api.async_register_command(hass, ws_daily_breakdown)
     websocket_api.async_register_command(hass, ws_rolling_summary)
+    websocket_api.async_register_command(hass, ws_subscribe_summaries)
