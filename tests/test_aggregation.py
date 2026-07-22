@@ -161,6 +161,26 @@ def test_compute_daily_breakdown_reset_is_none():
     assert breakdown == [{"day": 12, "consumption": None}]
 
 
+def test_compute_daily_breakdown_multiple_rows_per_day_collapses_to_one():
+    # The ledger keeps one row per actual poll -- several per day for water
+    # meters -- unlike the old recorder-based per-day query, which always
+    # produced exactly one row per day. Multiple same-day rows must collapse
+    # to exactly one {"day": ...} entry, using the day's LAST (latest)
+    # cumulative reading as that day's ending total.
+    rows = [
+        {"start": datetime(2026, 7, 11, 0, 0), "sum": 100.0},
+        {"start": datetime(2026, 7, 12, 8, 0), "sum": 100.3},
+        {"start": datetime(2026, 7, 12, 13, 0), "sum": 100.5},
+        {"start": datetime(2026, 7, 12, 20, 0), "sum": 100.8},  # day 12's true ending total
+        {"start": datetime(2026, 7, 13, 9, 0), "sum": 101.2},
+    ]
+    breakdown = compute_daily_breakdown(rows)
+    assert breakdown == [
+        {"day": 12, "consumption": pytest.approx(0.8)},  # 100.8 - 100.0
+        {"day": 13, "consumption": pytest.approx(0.4)},  # 101.2 - 100.8
+    ]
+
+
 # ---------------------------------------------------------------------------
 # compute_reset_compensated_sums — the _bucket_by_hour reset-compensation fix
 # ---------------------------------------------------------------------------
@@ -207,7 +227,8 @@ def test_compute_reset_compensated_sums_small_dip_within_threshold_still_diffs()
 
 
 def test_compute_monthly_summary_for_year_same_month_multiple_row_times():
-    # Two raw rows both fall in July, at different times of day/month.
+    # Three raw rows: June's own baseline, plus TWO July rows at different
+    # times of day/month.
     rows = [
         {"start": _dt(2026, 6, 1), "sum": 100.0},
         {"start": datetime(2026, 7, 1, 0, 0), "sum": 130.0},
@@ -216,17 +237,22 @@ def test_compute_monthly_summary_for_year_same_month_multiple_row_times():
     summary = compute_monthly_summary_for_year(rows, 2026)
     julys = [m for m in summary["months"] if m["month"] == 7]
     assert len(julys) == 1  # exactly one July entry, never two
-    # Uses the chronologically LAST July row for July's own consumption.
-    assert julys[0]["consumption"] == pytest.approx(999.0 - 130.0)
+    # July's true total is its LAST reading (999) minus the previous
+    # period's (June's) LAST reading (100) = 899 — not just the delta
+    # between the two July-tagged rows (999-130=869), which would silently
+    # discard the June1->July1 portion of July's own consumption. This was
+    # a real bug in the pre-resampling version of _by_year_month, never hit
+    # in production because the recorder-based path always produced exactly
+    # one row per month — but the ledger's many-rows-per-month is the normal
+    # case, so this had to be fixed for real (see _resample_to_last_per_period).
+    assert julys[0]["consumption"] == pytest.approx(999.0 - 100.0)
 
 
 def test_compute_monthly_summary_for_year_tz_aware_rows_same_calendar_month():
     # Two tz-aware timestamps that are hours apart but land in the same
     # local calendar month once normalized (as statistics.py's
     # _normalize_rows already does before calling this function) — simulates
-    # a suspected timezone-duplicate scenario. Both rows tag as July, so the
-    # dict keeps only the chronologically LAST one (30 = 160-130), not the
-    # sum of both — exactly one July entry, never two.
+    # a suspected timezone-duplicate scenario.
     tz = timezone(timedelta(hours=2))
     rows = [
         {"start": datetime(2026, 6, 30, 23, 0, tzinfo=tz), "sum": 100.0},
@@ -236,7 +262,30 @@ def test_compute_monthly_summary_for_year_tz_aware_rows_same_calendar_month():
     summary = compute_monthly_summary_for_year(rows, 2026)
     julys = [m for m in summary["months"] if m["month"] == 7]
     assert len(julys) == 1
-    assert julys[0]["consumption"] == pytest.approx(30.0)  # 160 - 130, last July row wins
+    # July's true total: its own last reading (160) minus June's last
+    # reading (100) = 60 — including the June30 23:00 -> July1 0:00 delta
+    # (30), which rightfully belongs to July under the existing "tag by the
+    # later row's month" convention. Not 30 (just 160-130, the old buggy
+    # behavior that silently dropped that first delta).
+    assert julys[0]["consumption"] == pytest.approx(60.0)
+
+
+def test_compute_monthly_summary_for_year_many_rows_per_month_no_silent_loss():
+    # Mirrors the ledger's real shape: MANY rows within a single month (not
+    # just two), like several-times-daily water polling would produce.
+    # July's total must be its true first-to-last delta, not just the delta
+    # between the final two of the many July rows.
+    rows = [
+        {"start": _dt(2026, 6, 30), "sum": 100.0},
+        {"start": _dt(2026, 7, 2), "sum": 100.5},
+        {"start": _dt(2026, 7, 10), "sum": 101.2},
+        {"start": _dt(2026, 7, 18), "sum": 101.9},
+        {"start": _dt(2026, 7, 25), "sum": 102.4},
+        {"start": _dt(2026, 7, 31), "sum": 102.8},  # July's true ending total
+    ]
+    summary = compute_monthly_summary_for_year(rows, 2026)
+    july = next(m for m in summary["months"] if m["month"] == 7)
+    assert july["consumption"] == pytest.approx(102.8 - 100.0)  # not 102.8 - 102.4
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +515,24 @@ def test_compute_rolling_window_total_partial_window_still_sums_available_days()
     rows = _daily_rows(as_of - timedelta(days=10), 10, 1.0)
     result = compute_rolling_window_total(rows, as_of, window_days=30)
     assert result["total"] == pytest.approx(10.0)
+
+
+def test_compute_rolling_window_total_many_rows_per_day_no_double_counting():
+    # Unlike _by_year_month/_by_day (which needed the _resample_to_last_per_period
+    # fix), compute_rolling_window_total sums CONSECUTIVE telescoping deltas
+    # directly rather than collapsing to one row per period first -- so
+    # several ledger rows within the same day must sum to that day's real
+    # total consumption exactly once, neither lost nor double-counted.
+    as_of = date(2026, 7, 15)
+    window_end = as_of - timedelta(days=1)  # 2026-07-14
+    rows = [
+        {"start": datetime(2026, 7, 13, 0, 0), "sum": 100.0},  # baseline
+        {"start": datetime(2026, 7, 14, 8, 0), "sum": 100.3},
+        {"start": datetime(2026, 7, 14, 13, 0), "sum": 100.5},
+        {"start": datetime(2026, 7, 14, 20, 0), "sum": 100.8},  # window_end's true total
+    ]
+    result = compute_rolling_window_total(rows, as_of, window_days=30)
+    assert result["total"] == pytest.approx(0.8)  # 100.8 - 100.0, not just the last leg (0.3)
 
 
 def test_compute_rolling_window_total_immune_to_invalid_reading_in_window():

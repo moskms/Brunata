@@ -5,12 +5,20 @@ from homeassistant.const import Platform
 from homeassistant.util import slugify
 
 DOMAIN = "brunata"
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BUTTON]
 UPDATE_INTERVAL = timedelta(hours=1)
 
 # ConfigEntry.data flag: has the one-time historical backfill (mountingDate ->
 # first setup) already run? Must only ever happen once — see coordinator.py.
 CONF_HISTORY_IMPORTED = "history_imported"
+
+# ConfigEntry.data flag: has the one-time ledger backfill (from Brunata's own
+# raw metervalues history, NOT the recorder) already run? Tracked separately
+# from CONF_HISTORY_IMPORTED so existing installs upgrading to include the
+# ledger feature still get it seeded once, even though their recorder
+# backfill already completed long ago — see coordinator.py's
+# async_import_history_if_needed().
+CONF_LEDGER_BACKFILLED = "ledger_backfilled"
 
 # allocationUnit -> (entity_id slug, display name). These produce exactly the
 # entity IDs required by copilot-instructions-del2.md (sensor.brunata_varme,
@@ -19,6 +27,9 @@ CONF_HISTORY_IMPORTED = "history_imported"
 # entity_id ahead of time when handing history off to statistics.py.
 ALLOCATION_UNIT_SLUGS = {"O": "varme", "W": "varmt_vand", "K": "koldt_vand"}
 ALLOCATION_UNIT_NAMES = {"O": "Varme", "W": "Varmt vand", "K": "Koldt vand"}
+
+# allocationUnit -> HA unit of measurement, matching sensor.py's native units.
+ALLOCATION_UNIT_OF_MEASUREMENT = {"O": "kWh", "W": "m³", "K": "m³"}
 
 # allocationUnit values whose physical counter can genuinely reset to ~0
 # (confirmed real case: a heat/radiator meter's cumulative value). Water
