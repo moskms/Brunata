@@ -235,3 +235,31 @@ fixtures — ingen netværkskald).
 Dette projekt er ikke tilknyttet, godkendt af, eller understøttet af Brunata A/S. Brug på eget
 ansvar. Login-flowet er reverse-engineered fra den offentligt tilgængelige webportal og kan ophøre
 med at virke, hvis Brunata ændrer deres systemer.
+
+## Versionshistorik
+
+Version følger skemaet `1.XX`, hvor `XX` er det samlede antal større, afsluttede
+ændringer/milepæle i projektets historie (se `custom_components/brunata/manifest.json`).
+
+- **1.01** — Første Brunata Online Python-klient + AppDaemon-baseret HA-integration (offline
+  `load_from_file`, første pytest-suite).
+- **1.02** — Bekræftet, reverse-engineered login-flow (Keycloak/PKCE) og live
+  `fetch_consumption_data` mod det rigtige API.
+- **1.03** — Native Home Assistant-integration oprettet (`custom_components/brunata/`):
+  config flow, sensorer, engangs-historik-import.
+- **1.04** — Generalisering til vilkårligt antal målere pr. type, og korrekt kompensation for
+  ægte fysiske varmemåler-resets.
+- **1.05** — Måned/dag-forbrugskort (`brunata-monthly-card.js`) og WebSocket API med
+  år-til-år-sammenligning.
+- **1.06** — Automatisk "Brunata"-dashboard-oprettelse og -fjernelse ved installation/afinstallation.
+- **1.07** — Permanent debug-eksport-service (`services.py`) til fejlsøgning af rå målerdata.
+- **1.08** — Håndtering af det først observerede "hul i data" (13. juli-diskontinuiteten) i
+  måned/dag-visningen.
+- **1.09** — Generel, uafhængig datavaliderings-/selvhelbredende algoritme (monotoni-tjek,
+  adskilt fra den fysiske reset-kompensation).
+- **1.10** — Aktivitetslog: poll-succes/fejl vises nu i enhedens "Aktivitet"-fane.
+- **1.11** — "Sidste 30 dage"-forbrugsoversigt med år-til-år-sammenligning.
+- **1.12** — Dashboard-layout rettet til "sections"-visning (fuld-bredde titel, ensrettet
+  sektionsbund) samt kort-æstetik.
+- **1.13** — WebSocket-subscription til robusthed mod midlertidige forbindelsesfejl ved
+  dashboard-åbning.

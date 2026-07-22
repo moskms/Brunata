@@ -170,8 +170,40 @@ class BrunataMonthlyCard extends HTMLElement {
     if (!this._initialized) {
       this._initialized = true;
       this._activeDailyKey = null; // "meterId-year-month" of the currently shown daily chart, if any
+      // meter_id (string) -> { monthly_summary, rolling_summary }, kept in
+      // sync via _subscribeSummaries() below. Used to render the initial/
+      // default view without any WS round-trip — see _loadRollingSummary
+      // and _loadYear's `year === null` branch.
+      this._summaries = {};
       this._render();
+      this._subscribeSummaries();
       this._loadMeters();
+    }
+  }
+
+  disconnectedCallback() {
+    this._summariesUnsub?.();
+  }
+
+  async _subscribeSummaries() {
+    // Reuses hass.connection — the same long-lived, auto-reconnecting WS
+    // connection the frontend itself uses for entity-state sync — instead
+    // of a one-shot hass.callWS(). This is what makes the dashboard robust
+    // against a momentary WS hiccup at the exact moment it loads: a plain
+    // RPC fired at the wrong instant simply fails, while a subscription
+    // resumes automatically once the connection is back, and always
+    // delivers its current snapshot immediately upon (re)subscribing.
+    // Fails silently (falls back to on-demand WS calls per meter below) if
+    // the backend doesn't support this command yet (e.g. mid-upgrade).
+    try {
+      this._summariesUnsub = await this._hass.connection.subscribeMessage(
+        (snapshot) => {
+          this._summaries = snapshot || {};
+        },
+        { type: "brunata/subscribe_summaries" }
+      );
+    } catch (err) {
+      console.warn("brunata-monthly-card: kunne ikke abonnere på forudberegnede resuméer", err);
     }
   }
 
@@ -296,10 +328,15 @@ class BrunataMonthlyCard extends HTMLElement {
   }
 
   async _loadRollingSummary(meter, rollingEl) {
-    const summary = await this._hass.callWS({
+    // Prefer the precomputed value pushed via _subscribeSummaries — only
+    // falls through to the on-demand WS call if that hasn't arrived yet
+    // (e.g. right after a reload, before the coordinator's first poll) or
+    // the backend doesn't support the subscription at all.
+    const precomputed = this._summaries[String(meter.meter_id)]?.rolling_summary;
+    const summary = precomputed || (await this._hass.callWS({
       type: "brunata/rolling_summary",
       meter_id: meter.meter_id,
-    });
+    }));
 
     const isHeat = meter.allocation_unit === "O" && summary.scale;
     const unit = isHeat ? "enheder" : this._unitFor(meter.entity_id);
@@ -345,9 +382,19 @@ class BrunataMonthlyCard extends HTMLElement {
 
   async _loadYear(meter, listEl, yearSelect, year) {
     listEl.textContent = "Indlæser…";
-    const msg = { type: "brunata/monthly_summary", meter_id: meter.meter_id };
-    if (year !== null) msg.year = year;
-    const summary = await this._hass.callWS(msg);
+    // The precomputed cache only ever holds the default/most-recent year
+    // (same as calling brunata/monthly_summary with no `year`) — switching
+    // to an explicit other year always goes through the on-demand WS call,
+    // same as before.
+    const precomputed = year === null
+      ? this._summaries[String(meter.meter_id)]?.monthly_summary
+      : null;
+    let summary = precomputed;
+    if (!summary) {
+      const msg = { type: "brunata/monthly_summary", meter_id: meter.meter_id };
+      if (year !== null) msg.year = year;
+      summary = await this._hass.callWS(msg);
+    }
 
     if (!summary.available_years.length) {
       listEl.textContent = "Ingen data endnu.";
