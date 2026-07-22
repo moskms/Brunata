@@ -12,16 +12,21 @@ nothing here assumes exactly one heat/hot-water/cold-water meter.
 from __future__ import annotations
 
 import logging
+from collections import deque
+from datetime import datetime
 
 from homeassistant.components.logbook import async_log_entry
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .brunata_client import BrunataClient
 from .brunata_client.exceptions import BrunataLoginError, BrunataSessionError
-from .brunata_client.history import fetch_all_meter_history
+from .brunata_client.history import fetch_all_meter_history, parse_brunata_datetime
 from .brunata_client.models import MeterReading
+from .brunata_client.scheduling import compute_next_poll_target
 
 from . import debug_export, statistics
 from .const import (
@@ -37,6 +42,16 @@ _LOGGER = logging.getLogger(__name__)
 
 # unit code -> HA unit of measurement, matching sensor.py's native units.
 _UNIT_OF_MEASUREMENT = {"O": "kWh", "W": "m³", "K": "m³"}
+
+# Adaptive polling (see brunata_client/scheduling.py for the actual median/
+# rounding math, unit-tested offline). Water meters (W/K) update several
+# times a day — a longer rolling window smooths out day-to-day jitter; heat
+# (O) updates once a day, so its window is sized in "days of history"
+# instead. Both are "a couple of weeks" of real observations either way.
+_MIN_OBSERVATIONS = 5
+_WATER_HISTORY_LEN = 30
+_HEAT_HISTORY_LEN = 14
+_ROUND_TO_MINUTES = 5
 
 
 class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]]):
@@ -62,6 +77,16 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
         # attribute) — never written to the recorder database.
         self.monthly_summaries: dict[int, dict] = {}
         self.rolling_summaries: dict[int, dict] = {}
+        # Adaptive polling state — in-memory only, resets to the fixed
+        # UPDATE_INTERVAL fallback on every restart/reload (same precedent
+        # as the summaries above), and re-learns within _MIN_OBSERVATIONS
+        # polls. Keyed by meter_id so per-meter drift is possible even
+        # though the scheduling DECISION itself is made per meter-type
+        # (see _async_maybe_reschedule) — there's only one shared
+        # meteroverview API call per account, so only one schedule exists.
+        self._reading_time_history: dict[int, deque[datetime]] = {}
+        self._current_schedule: tuple[int | None, int] | None = None
+        self._unsub_schedule = None
 
     def _log_activity(self, message: str) -> None:
         """Write one line to this device's Activity tab, so it's visible at a
@@ -73,21 +98,40 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
 
         logbook.async_log_entry is a synchronous @callback despite its
         "async_" prefix (confirmed against HA's own source) — must be
-        called directly, not awaited. Requires an entity_id belonging to
-        this device to associate the entry with it; skipped if no meter is
-        known yet (e.g. the very first poll fails before any meter list has
-        ever been fetched).
+        called directly, not awaited.
+
+        The entity_id these entries attach to MUST be sensor.py's
+        BrunataStatusSensor, not one of the three real meter sensors —
+        confirmed against homeassistant/components/logbook/helpers.py's
+        is_sensor_continuous(): any sensor with a unit_of_measurement, a
+        state_class, or a numeric device_class (which all three meter
+        sensors correctly have, for the Energy dashboard) is treated as a
+        "continuous" data source and its logbook entries are silently
+        excluded from the Activity tab — pointing at a meter sensor here
+        would run correctly every hour and never once show up. The status
+        entity has none of those three attributes, so its entries aren't
+        filtered.
+
+        Resolved via the entity registry by unique_id (async_get_entity_id —
+        a cheap, synchronous, @callback lookup, confirmed safe to call here
+        against HA's own entity_registry.py) rather than a hardcoded entity_id
+        string, since sensor.py deliberately leaves this entity's entity_id
+        to HA's own registry to assign/disambiguate (relevant if more than
+        one Brunata account is ever configured). Returns None — and is
+        skipped here — if the entity hasn't been registered yet (e.g. the
+        very first poll, before sensor.py's async_setup_entry has run).
         """
-        if not self.active_meters:
+        entity_id = er.async_get(self.hass).async_get_entity_id(
+            "sensor", DOMAIN, f"{self.entry.entry_id}_status"
+        )
+        if entity_id is None:
             return
-        naming = build_meter_naming(self.active_meters)
-        object_id, _name = naming[self.active_meters[0]["meterId"]]
         async_log_entry(
             self.hass,
             name="Brunata",
             message=message,
             domain=DOMAIN,
-            entity_id=f"sensor.brunata_{object_id}",
+            entity_id=entity_id,
         )
 
     async def _fetch_active_meters(self) -> list[dict]:
@@ -158,8 +202,128 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
                 type(err).__name__, err,
             )
 
+        self._record_reading_observations(result)
+        try:
+            await self._async_maybe_reschedule()
+        except Exception as err:  # noqa: BLE001 — best-effort, must not break the live poll
+            _LOGGER.warning(
+                "Could not update adaptive polling schedule (%s: %s) — keeping "
+                "the current schedule",
+                type(err).__name__, err,
+            )
+
         self._log_activity(f"Opdaterede data for {len(result)} måler(e) fra Brunata Online")
         return result
+
+    def _record_reading_observations(self, readings: dict[int, MeterReading]) -> None:
+        """Append a new observation to a meter's rolling history whenever its
+        `reading_date` (Brunata's own per-meter telegramDate) genuinely
+        changed since the last poll — not just because a poll happened.
+
+        This is what lets scheduling.py learn the true intra-hour delivery
+        pattern even though we currently only poll once an hour: Brunata's
+        own timestamp already encodes the precise moment a reading was
+        taken, independent of when we happened to check for it.
+        """
+        for meter_id, reading in readings.items():
+            if reading.reading_date is None:
+                continue
+            try:
+                observed = parse_brunata_datetime(reading.reading_date)
+            except (ValueError, TypeError):
+                continue
+
+            history = self._reading_time_history.get(meter_id)
+            if history is None:
+                max_len = _HEAT_HISTORY_LEN if reading.allocation_unit == "O" else _WATER_HISTORY_LEN
+                history = deque(maxlen=max_len)
+                self._reading_time_history[meter_id] = history
+
+            if history and history[-1] == observed:
+                continue  # same telegram as last poll — not a new reading
+            history.append(observed)
+
+    async def _async_maybe_reschedule(self) -> None:
+        """Recompute the adaptive poll target from the (possibly
+        just-updated) observation history, and switch HA's own scheduling
+        mechanism if the target has changed since last time.
+
+        Which meter type governs the schedule: a mixed or water-only
+        account is always governed by the water-driven, several-times-daily
+        cadence — one shared meteroverview call covers every meter
+        regardless, so heat can't independently slow the account's overall
+        polling down without starving the water meters. Only an account
+        with NO water meters at all (heat-only) switches to the genuinely
+        rare, once-daily cadence — see the module docstring in
+        scheduling.py for the actual median/rounding math (pure, unit-tested
+        offline).
+        """
+        water_ids = [m["meterId"] for m in self.active_meters if m["allocationUnit"] in ("W", "K")]
+        heat_ids = [m["meterId"] for m in self.active_meters if m["allocationUnit"] == "O"]
+
+        if water_ids:
+            observations = [
+                ts for meter_id in water_ids for ts in self._reading_time_history.get(meter_id, ())
+            ]
+            target = compute_next_poll_target(
+                observations, min_observations=_MIN_OBSERVATIONS,
+                round_to_minutes=_ROUND_TO_MINUTES, daily=False,
+            )
+        elif heat_ids:
+            observations = [
+                ts for meter_id in heat_ids for ts in self._reading_time_history.get(meter_id, ())
+            ]
+            target = compute_next_poll_target(
+                observations, min_observations=_MIN_OBSERVATIONS,
+                round_to_minutes=_ROUND_TO_MINUTES, daily=True,
+            )
+        else:
+            target = None  # no meters at all yet
+
+        if target == self._current_schedule:
+            return
+
+        self._current_schedule = target
+        if self._unsub_schedule is not None:
+            self._unsub_schedule()
+            self._unsub_schedule = None
+
+        if target is None:
+            # Not enough observations yet (or no meters) — fall back to
+            # HA's own normal built-in fixed-interval polling.
+            self.update_interval = UPDATE_INTERVAL
+            return
+
+        hour, minute = target
+        self.update_interval = None  # disable the built-in interval loop — we drive refreshes ourselves now
+        self._unsub_schedule = async_track_time_change(
+            self.hass, self._async_scheduled_refresh, hour=hour, minute=minute, second=0
+        )
+        _LOGGER.info(
+            "Brunata adaptive polling: switched to %s at %s based on %d observed reading(s)",
+            "once daily" if hour is not None else "every hour",
+            f"{hour:02d}:{minute:02d}" if hour is not None else f"xx:{minute:02d}",
+            len(observations),
+        )
+
+    async def _async_scheduled_refresh(self, _now: datetime) -> None:
+        """async_track_time_change's callback — confirmed against HA's own
+        helpers/event.py that `action` is dispatched via
+        hass.async_run_hass_job, which correctly awaits an async def
+        callback (unlike hass.services.async_register's lambda pitfall
+        found earlier in this project), so this can be a real coroutine.
+        """
+        await self.async_request_refresh()
+
+    def async_shutdown_adaptive_schedule(self) -> None:
+        """Cancel the adaptive polling listener, if one is registered —
+        called from __init__.py's async_unload_entry so a removed/reloaded
+        config entry doesn't leave a dangling time-change callback pointing
+        at a coordinator that's no longer in use.
+        """
+        if self._unsub_schedule is not None:
+            self._unsub_schedule()
+            self._unsub_schedule = None
 
     async def _async_compute_summaries(self, readings: dict[int, MeterReading]) -> None:
         """Precompute each active meter's monthly + rolling-30-day summary,

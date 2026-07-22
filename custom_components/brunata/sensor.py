@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfVolume
 
 from .const import DOMAIN, build_meter_naming
 from .coordinator import BrunataDataUpdateCoordinator
@@ -35,7 +35,7 @@ async def async_setup_entry(
     meters_by_id = {m["meterId"]: m for m in coordinator.active_meters}
     naming = build_meter_naming(coordinator.active_meters)
 
-    async_add_entities(
+    entities = [
         BrunataSensor(
             coordinator,
             entry,
@@ -45,7 +45,9 @@ async def async_setup_entry(
             name=name,
         )
         for meter_id, (object_id, name) in naming.items()
-    )
+    ]
+    entities.append(BrunataStatusSensor(coordinator, entry))
+    async_add_entities(entities)
 
 
 class BrunataSensor(CoordinatorEntity[BrunataDataUpdateCoordinator], SensorEntity):
@@ -101,3 +103,50 @@ class BrunataSensor(CoordinatorEntity[BrunataDataUpdateCoordinator], SensorEntit
             if reading.scale is not None
             else reading.reading_value
         )
+
+
+class BrunataStatusSensor(CoordinatorEntity[BrunataDataUpdateCoordinator], SensorEntity):
+    """Diagnostic-only entity with no unit_of_measurement, state_class, or
+    device_class — unlike the three real meter sensors above.
+
+    Exists purely so coordinator.py's _log_activity() has an entity_id its
+    logbook entries can attach to that Home Assistant's own Activity tab
+    won't silently filter out. Confirmed against homeassistant/components/
+    logbook/helpers.py's is_sensor_continuous(): ANY sensor entity with a
+    unit_of_measurement, a state_class, or a numeric device_class is
+    treated as a "continuous" data source and excluded from the Activity/
+    logbook view entirely — which the three meter sensors all correctly
+    have (required for the Energy dashboard), so they could never show
+    activity entries no matter how _log_activity() was pointed at them.
+    This entity deliberately has none of those three attributes, so it is
+    not "continuous" and its logbook entries DO show up.
+
+    Its own state ("OK"/"Fejl", mirroring the coordinator's last poll
+    outcome) is secondary — a small bonus beyond just being a valid logbook
+    anchor, per the diagnostic-entity convention (entity_category=
+    diagnostic keeps it out of the way on the main device card).
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_name = "Status"
+
+    def __init__(self, coordinator: BrunataDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        # Deliberately NOT an explicit self.entity_id override (unlike
+        # BrunataSensor above) — this entity has no long-term-statistics
+        # dependency on a predictable entity_id, so HA's own entity registry
+        # is free to pick/disambiguate it normally (matters if more than one
+        # Brunata account is ever configured). coordinator.py resolves the
+        # actual, current entity_id by unique_id via the entity registry
+        # instead of assuming a fixed string — see _log_activity().
+        self._attr_unique_id = f"{entry.entry_id}_status"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Brunata",
+            manufacturer="Brunata",
+        )
+
+    @property
+    def native_value(self) -> str:
+        return "OK" if self.coordinator.last_update_success else "Fejl"
