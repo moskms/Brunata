@@ -105,14 +105,37 @@ def compute_period_deltas(rows: list[dict]) -> list[dict]:
     return deltas
 
 
-def _by_year_month(rows: list[dict]) -> dict[tuple[int, int], float | None]:
-    """[{"start", "sum"}, ...] -> {(year, month): consumption | None}.
+def _resample_to_last_per_period(rows: list[dict], period_key) -> list[dict]:
+    """[{"start", "sum"}, ...] -> one row per distinct `period_key(row["start"])`,
+    keeping only the chronologically LAST row seen for each period.
 
-    A dict comprehension inherently collapses duplicate (year, month) keys
-    (keeping the last), which also protects against duplicate/overlapping
-    raw rows for the same period ever producing duplicate months downstream.
+    This must run BEFORE compute_period_deltas whenever more than one row
+    can share the same period (e.g. the ledger keeps one row per actual
+    poll — several per day/month for water meters — unlike the old
+    recorder-based per-period statistics query, which always produced
+    exactly one row per period). Diffing every CONSECUTIVE raw row and only
+    then collapsing duplicates by period would silently keep just the delta
+    between the last two rows of a period, discarding any consumption from
+    earlier in that same period — resampling to one row per period FIRST
+    means the subsequent diff is between two whole periods' true ending
+    totals, which is what actually adds up to that period's real
+    consumption regardless of how many readings happened in between.
+
+    Assumes `rows` is already chronologically sorted (guaranteed by every
+    caller in this module). Relies on dict iteration preserving first-
+    insertion key order (guaranteed since Python 3.7) so the result stays
+    chronological without a separate sort.
     """
-    deltas = compute_period_deltas(rows)
+    by_period: dict = {}
+    for row in rows:
+        by_period[period_key(row["start"])] = row  # later rows overwrite -> last one wins
+    return list(by_period.values())
+
+
+def _by_year_month(rows: list[dict]) -> dict[tuple[int, int], float | None]:
+    """[{"start", "sum"}, ...] -> {(year, month): consumption | None}."""
+    resampled = _resample_to_last_per_period(rows, lambda start: (start.year, start.month))
+    deltas = compute_period_deltas(resampled)
     return {(d["start"].year, d["start"].month): d["consumption"] for d in deltas}
 
 
@@ -207,13 +230,23 @@ def compute_rolling_window_total(
     return {"total": total, "diff_from_last_year": diff_from_last_year}
 
 
-def compute_daily_breakdown(rows: list[dict]) -> list[dict]:
-    """rows: chronological [{"start": datetime, "sum": float}, ...], one per
-    day, spanning the target month plus one baseline day before it.
+def _by_day(rows: list[dict]) -> dict[date, float | None]:
+    """[{"start", "sum"}, ...] -> {date: consumption | None}. Same
+    resample-before-diffing approach as _by_year_month, for the same reason
+    (a day can have many input rows from the ledger)."""
+    resampled = _resample_to_last_per_period(rows, lambda start: start.date())
+    deltas = compute_period_deltas(resampled)
+    return {d["start"].date(): d["consumption"] for d in deltas}
 
-    Returns [{"day": int, "consumption": float | None}, ...] for every day
-    present in the deltas, in date order. `consumption` is None on a reset
+
+def compute_daily_breakdown(rows: list[dict]) -> list[dict]:
+    """rows: chronological [{"start": datetime, "sum": float}, ...], spanning
+    the target month plus at least one baseline row before it. May contain
+    more than one row per calendar day (see _by_day).
+
+    Returns [{"day": int, "consumption": float | None}, ...], one entry per
+    distinct day present, in date order. `consumption` is None on a reset
     day — see compute_period_deltas.
     """
-    deltas = compute_period_deltas(rows)
-    return [{"day": d["start"].day, "consumption": d["consumption"]} for d in deltas]
+    by_day = _by_day(rows)
+    return [{"day": day.day, "consumption": consumption} for day, consumption in sorted(by_day.items())]

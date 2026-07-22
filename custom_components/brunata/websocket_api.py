@@ -120,17 +120,19 @@ async def ws_monthly_summary(hass: HomeAssistant, connection, msg) -> None:
         connection.send_error(msg["id"], "not_found", f"Unknown meter_id {meter_id}")
         return
     entity_id, meter = resolved
+    scale = _scale_for_meter(hass, meter_id)
     result = await statistics.async_get_monthly_summary(
         hass,
-        entity_id,
+        meter_id,
         msg.get("year"),
-        mounting_date=meter.get("mountingDate"),
         allocation_unit=meter.get("allocationUnit"),
+        scale=scale,
+        entity_id=entity_id,
     )
     # Included so the frontend card can show heat consumption in raw
     # "enheder" instead of kWh in the monthly table only (None for water
     # meters, which have no scale factor).
-    result["scale"] = _scale_for_meter(hass, meter_id)
+    result["scale"] = scale
     connection.send_result(msg["id"], result)
 
 
@@ -144,13 +146,20 @@ async def ws_monthly_summary(hass: HomeAssistant, connection, msg) -> None:
 )
 @websocket_api.async_response
 async def ws_daily_breakdown(hass: HomeAssistant, connection, msg) -> None:
-    resolved = _resolve_meter(hass, msg["meter_id"])
+    meter_id = msg["meter_id"]
+    resolved = _resolve_meter(hass, meter_id)
     if resolved is None:
-        connection.send_error(msg["id"], "not_found", f"Unknown meter_id {msg['meter_id']}")
+        connection.send_error(msg["id"], "not_found", f"Unknown meter_id {meter_id}")
         return
     entity_id, meter = resolved
     result = await statistics.async_get_daily_breakdown(
-        hass, entity_id, msg["year"], msg["month"], allocation_unit=meter.get("allocationUnit")
+        hass,
+        meter_id,
+        msg["year"],
+        msg["month"],
+        allocation_unit=meter.get("allocationUnit"),
+        scale=_scale_for_meter(hass, meter_id),
+        entity_id=entity_id,
     )
     connection.send_result(msg["id"], result)
 
@@ -170,15 +179,18 @@ async def ws_rolling_summary(hass: HomeAssistant, connection, msg) -> None:
         connection.send_error(msg["id"], "not_found", f"Unknown meter_id {meter_id}")
         return
     entity_id, meter = resolved
+    scale = _scale_for_meter(hass, meter_id)
     result = await statistics.async_get_rolling_summary(
         hass,
-        entity_id,
+        meter_id,
         allocation_unit=meter.get("allocationUnit"),
+        scale=scale,
+        entity_id=entity_id,
         window_days=msg.get("window_days", 30),
     )
     # Same reasoning as ws_monthly_summary: lets the frontend show heat's
     # rolling total in raw "enheder" instead of kWh.
-    result["scale"] = _scale_for_meter(hass, meter_id)
+    result["scale"] = scale
     connection.send_result(msg["id"], result)
 
 

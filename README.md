@@ -266,3 +266,10 @@ Version følger skemaet `1.XX`, hvor `XX` er det samlede antal større, afslutte
 - **1.14** — Adaptiv, selvlærende pollings-timing baseret på Brunatas faktiske
   telegramDate-leveringsmønster (vandmålere pooled, varmemåler separat), samt en ny
   diagnostisk status-entitet, der retter aktivitetslog-filtreringen fra 1.10.
+- **1.15** — Native "Opdatér nu"-knap (diagnostisk knap-entitet) til at tvinge en
+  øjeblikkelig frisk hentning fra Brunata, uden at vente på den adaptive pollings-tid.
+- **1.16** — Integrationsejet forbrugs-ledger (JSONL, uafhængig af HA's recorder
+  "sum"-kolonne): måneds-/dags-/rullende-beregningerne i dashboard-kortet læser nu
+  herfra i stedet for `statistics_during_period()`, verificeret til at matche
+  Brunatas egen hjemmeside præcist. Rummer også en manuel (endnu ikke automatisk
+  koblet) service til at rette Energioversigtens statistik fra ledgeren.

@@ -28,20 +28,19 @@ from .brunata_client.history import fetch_all_meter_history, parse_brunata_datet
 from .brunata_client.models import MeterReading
 from .brunata_client.scheduling import compute_next_poll_target
 
-from . import debug_export, statistics
+from . import debug_export, ledger, statistics
 from .const import (
+    ALLOCATION_UNIT_OF_MEASUREMENT,
     ALLOCATION_UNIT_SLUGS,
     ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET,
     CONF_HISTORY_IMPORTED,
+    CONF_LEDGER_BACKFILLED,
     DOMAIN,
     UPDATE_INTERVAL,
     build_meter_naming,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-# unit code -> HA unit of measurement, matching sensor.py's native units.
-_UNIT_OF_MEASUREMENT = {"O": "kWh", "W": "m³", "K": "m³"}
 
 # Adaptive polling (see brunata_client/scheduling.py for the actual median/
 # rounding math, unit-tested offline). Water meters (W/K) update several
@@ -194,6 +193,14 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
             result[meter_id] = reading
 
         try:
+            await self._async_append_ledger_entries(result)
+        except Exception as err:  # noqa: BLE001 — best-effort, must not break the live poll
+            _LOGGER.warning(
+                "Could not append this poll's readings to the ledger (%s: %s)",
+                type(err).__name__, err,
+            )
+
+        try:
             await self._async_compute_summaries(result)
         except Exception as err:  # noqa: BLE001 — best-effort precompute, must not break the live poll
             _LOGGER.warning(
@@ -214,6 +221,29 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
 
         self._log_activity(f"Opdaterede data for {len(result)} måler(e) fra Brunata Online")
         return result
+
+    async def _async_append_ledger_entries(self, readings: dict[int, MeterReading]) -> None:
+        """One ledger line per meter per actual poll (see ledger.py) — NOT
+        deduplicated by whether the value changed, unlike
+        _record_reading_observations' scheduling history: every successful
+        poll is a real, independent Brunata data point worth keeping at full
+        resolution, per Fase 1's own requirement.
+
+        Skips a meter entirely if this poll didn't return a real reading
+        for it (reading_value/reading_date both None — e.g. active per
+        metersforconsumer but absent from this cycle's meteroverview), since
+        there's nothing real to record in that case.
+        """
+        for meter_id, reading in readings.items():
+            if reading.reading_value is None or reading.reading_date is None:
+                continue
+            try:
+                ts = parse_brunata_datetime(reading.reading_date)
+            except (ValueError, TypeError):
+                continue
+            await ledger.async_append_entry(
+                self.hass, meter_id, reading.allocation_unit, ts, reading.reading_value
+            )
 
     def _record_reading_observations(self, readings: dict[int, MeterReading]) -> None:
         """Append a new observation to a meter's rolling history whenever its
@@ -330,9 +360,8 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
         the same calculation websocket_api.py's ws_monthly_summary/
         ws_rolling_summary already do on-demand — reusing the exact same
         statistics.py functions, just run once per hourly poll instead of
-        once per dashboard load. No extra Brunata API calls: these only read
-        from the recorder's own long-term statistics, already populated by
-        this same poll's regular sensor updates.
+        once per dashboard load. Reads from the ledger (see ledger.py), not
+        the recorder — no extra Brunata API calls either way.
 
         Deliberately best-effort per meter (a comparison to `readings`, this
         cycle's fresh data, not `self.data`, which the base
@@ -354,14 +383,15 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
             scale = reading.scale if reading else None
 
             monthly = await statistics.async_get_monthly_summary(
-                self.hass, entity_id, mounting_date=meter.get("mountingDate"),
-                allocation_unit=allocation_unit,
+                self.hass, meter_id, allocation_unit=allocation_unit,
+                scale=scale, entity_id=entity_id,
             )
             monthly["scale"] = scale
             monthly_summaries[meter_id] = monthly
 
             rolling = await statistics.async_get_rolling_summary(
-                self.hass, entity_id, allocation_unit=allocation_unit,
+                self.hass, meter_id, allocation_unit=allocation_unit,
+                scale=scale, entity_id=entity_id,
             )
             rolling["scale"] = scale
             rolling_summaries[meter_id] = rolling
@@ -370,13 +400,24 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
         self.rolling_summaries = rolling_summaries
 
     async def async_import_history_if_needed(self) -> None:
-        """One-time backfill from each meter's mountingDate to first setup.
+        """One-time backfill from each meter's mountingDate to first setup —
+        both into HA's recorder (CONF_HISTORY_IMPORTED, feeds the Energy
+        dashboard/native HA views) AND into the integration-owned ledger
+        (CONF_LEDGER_BACKFILLED, feeds the dashboard card — see ledger.py).
 
-        Never runs again once CONF_HISTORY_IMPORTED is set on the config
-        entry — ongoing data comes from the regular hourly meteroverview
-        polling above, via the recorder's automatic statistics compilation.
+        The two flags are tracked separately and checked independently:
+        an existing install upgrading to include the ledger feature already
+        has CONF_HISTORY_IMPORTED set (so its recorder backfill must NOT
+        re-run), but still needs CONF_LEDGER_BACKFILLED done — so this
+        fetches Brunata's raw history ONCE and feeds whichever of the two
+        backfills still needs it, rather than triggering a second,
+        redundant full history re-fetch just for the ledger. Never runs
+        either again once both flags are set — ongoing data comes from the
+        regular hourly meteroverview polling above.
         """
-        if self.entry.data.get(CONF_HISTORY_IMPORTED):
+        needs_recorder_backfill = not self.entry.data.get(CONF_HISTORY_IMPORTED)
+        needs_ledger_backfill = not self.entry.data.get(CONF_LEDGER_BACKFILLED)
+        if not needs_recorder_backfill and not needs_ledger_backfill:
             return
 
         naming = build_meter_naming(self.active_meters)
@@ -399,23 +440,34 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
             reading = self.data.get(result.meter_id) if self.data else None
             scale = reading.scale if reading else None
 
-            # Raw, pre-conversion export for manual cross-checking against
-            # Brunata's own portal — see debug_export.py. Only ever runs here
-            # (the one-time backfill), never on regular polling updates.
-            await debug_export.async_export_meter_debug_json(
-                self.hass, meter, scale, result.points
-            )
+            if needs_recorder_backfill:
+                # Raw, pre-conversion export for manual cross-checking
+                # against Brunata's own portal — see debug_export.py. Only
+                # ever runs here (the one-time backfill), never on regular
+                # polling updates.
+                await debug_export.async_export_meter_debug_json(
+                    self.hass, meter, scale, result.points
+                )
+                await statistics.async_import_meter_history(
+                    self.hass,
+                    entity_id=f"sensor.brunata_{object_id}",
+                    unit_of_measurement=ALLOCATION_UNIT_OF_MEASUREMENT[allocation_unit],
+                    name=f"Brunata {name}",
+                    points=result.points,
+                    scale=scale,
+                    allow_physical_reset=allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET,
+                )
 
-            await statistics.async_import_meter_history(
-                self.hass,
-                entity_id=f"sensor.brunata_{object_id}",
-                unit_of_measurement=_UNIT_OF_MEASUREMENT[allocation_unit],
-                name=f"Brunata {name}",
-                points=result.points,
-                scale=scale,
-                allow_physical_reset=allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET,
-            )
+            if needs_ledger_backfill:
+                await ledger.async_backfill_from_points(
+                    self.hass, result.meter_id, allocation_unit, result.points
+                )
 
+        entry_updates: dict = {}
+        if needs_recorder_backfill:
+            entry_updates[CONF_HISTORY_IMPORTED] = True
+        if needs_ledger_backfill:
+            entry_updates[CONF_LEDGER_BACKFILLED] = True
         self.hass.config_entries.async_update_entry(
-            self.entry, data={**self.entry.data, CONF_HISTORY_IMPORTED: True}
+            self.entry, data={**self.entry.data, **entry_updates}
         )

@@ -43,3 +43,22 @@ export_meter_data:
             - "day"
             - "week"
             - "month"
+
+reconcile_recorder_statistics:
+  name: Brunata — Ret recorder-statistik fra ledger (manuel)
+  description: >-
+    Genberegner én målers langtidsstatistik i HA's recorder ud fra
+    integrationens egen ledger-fil (uafhængig af recorder'ens "sum"-kolonne)
+    og retter den via async_import_statistics() — kun for allerede
+    afsluttede timer, aldrig den igangværende. Ikke koblet ind i normal
+    drift; kaldes kun manuelt herfra.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: >-
+        Den fulde entity_id, fx sensor.brunata_varmt_vand_entre — ikke et
+        meter_id, og ikke navnet ("Varmt vand Entre").
+      required: true
+      example: "sensor.brunata_varmt_vand_entre"
+      selector:
+        text:
