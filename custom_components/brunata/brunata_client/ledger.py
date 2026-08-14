@@ -70,3 +70,34 @@ def trim_to_max_age(
     """
     cutoff = as_of - timedelta(days=max_age_days)
     return [(ts, value) for ts, value in entries if ts >= cutoff]
+
+
+def find_gaps(
+    entries: list[tuple[datetime, int]], threshold: timedelta
+) -> list[tuple[datetime, datetime]]:
+    """Every pair of chronologically CONSECUTIVE entries more than
+    `threshold` apart, anywhere in the history — not just at the very end.
+
+    Confirmed real case this exists for (2026-08-12/13): the original
+    per-poll gap check (coordinator.py's _async_backfill_gap_if_needed)
+    only ever compares a fresh poll's reading against the ledger's OWN last
+    entry — so it can only ever catch a gap while it's still the newest,
+    unresolved thing in the ledger. Once even one later poll succeeds, that
+    poll's own entry becomes the new "last entry", and the earlier gap is
+    now buried in the MIDDLE of the history — invisible to that check
+    forever afterward, even though the hole itself never actually got
+    filled. This function has no such blind spot: it walks the whole
+    (assumed chronologically sorted — same precondition as trim_to_max_age)
+    history and reports every gap, wherever it sits, so a caller (see
+    custom_components/brunata/ledger.py's async_find_and_heal_all_gaps) can
+    retroactively backfill each one from Brunata's own history endpoint.
+
+    Returns [(gap_start, gap_end), ...] in chronological order — gap_start
+    is the earlier entry's own timestamp, gap_end the later one's, so a
+    caller can fetch exactly [gap_start, gap_end] to close it.
+    """
+    gaps = []
+    for (prev_ts, _prev_value), (next_ts, _next_value) in zip(entries, entries[1:]):
+        if next_ts - prev_ts > threshold:
+            gaps.append((prev_ts, next_ts))
+    return gaps

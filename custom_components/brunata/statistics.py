@@ -201,7 +201,7 @@ def _normalize_ledger_rows(
 
 async def async_get_monthly_summary(
     hass: HomeAssistant,
-    meter_id: int,
+    meter_no: str,
     year: int | None = None,
     allocation_unit: str | None = None,
     scale: float | None = None,
@@ -209,19 +209,21 @@ async def async_get_monthly_summary(
 ) -> dict:
     """Year-based monthly breakdown (Jan-Dec) plus which years have data.
 
-    If `year` is omitted (or has no data), defaults to the most recent year
-    that does have data. `allocation_unit` ("O"/"W"/"K") selects whether a
-    data drop is treated as a real physical reset or rejected as invalid —
-    see _normalize_ledger_rows. `scale` converts a heat meter's raw ledger
-    pulses to kWh (ignored for water). Returns {"available_years": [...],
-    "year": int | None, "months": [...], "total_consumption": float | None}
-    — see compute_monthly_summary_for_year for the "months"/
-    "total_consumption" shape. `available_years` is empty and
-    `year`/`total_consumption` are None if the meter has no ledger history
-    at all yet (e.g. right after a fresh setup, before the one-time ledger
-    backfill has completed).
+    `meter_no` is the meter's own serial number — the ledger file's on-disk
+    name (see ledger.py's module docstring), NOT Brunata's internal
+    `meterId`. If `year` is omitted (or has no data), defaults to the most
+    recent year that does have data. `allocation_unit` ("O"/"W"/"K") selects
+    whether a data drop is treated as a real physical reset or rejected as
+    invalid — see _normalize_ledger_rows. `scale` converts a heat meter's
+    raw ledger pulses to kWh (ignored for water). Returns
+    {"available_years": [...], "year": int | None, "months": [...],
+    "total_consumption": float | None} — see compute_monthly_summary_for_year
+    for the "months"/"total_consumption" shape. `available_years` is empty
+    and `year`/`total_consumption` are None if the meter has no ledger
+    history at all yet (e.g. right after a fresh setup, before the one-time
+    ledger backfill has completed).
     """
-    entries = await ledger.async_read_ledger(hass, meter_id)
+    entries = await ledger.async_read_ledger(hass, meter_no)
     allow_physical_reset = allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET
     rows = _normalize_ledger_rows(entries, allocation_unit, scale, allow_physical_reset, entity_id)
 
@@ -235,15 +237,19 @@ async def async_get_monthly_summary(
 
 async def async_get_daily_breakdown(
     hass: HomeAssistant,
-    meter_id: int,
+    meter_no: str,
     year: int,
     month: int,
     allocation_unit: str | None = None,
     scale: float | None = None,
     entity_id: str = "",
 ) -> list[dict]:
-    """{day, consumption} for every day in the given (year, month)."""
-    entries = await ledger.async_read_ledger(hass, meter_id)
+    """{day, consumption} for every day in the given (year, month).
+
+    `meter_no` is the meter's own serial number, matching the ledger file's
+    on-disk name — see ledger.py's module docstring.
+    """
+    entries = await ledger.async_read_ledger(hass, meter_no)
     allow_physical_reset = allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET
     rows = _normalize_ledger_rows(entries, allocation_unit, scale, allow_physical_reset, entity_id)
 
@@ -265,7 +271,7 @@ async def async_get_daily_breakdown(
 
 async def async_get_rolling_summary(
     hass: HomeAssistant,
-    meter_id: int,
+    meter_no: str,
     allocation_unit: str | None = None,
     scale: float | None = None,
     entity_id: str = "",
@@ -276,8 +282,11 @@ async def async_get_rolling_summary(
     Brunata's own portal's "Sidste 30 dage" summary cards, shown above the
     individual meters in the dashboard card. Reuses the same ledger-based,
     reset-/invalid-data-validated computation as the monthly/daily views.
+
+    `meter_no` is the meter's own serial number, matching the ledger file's
+    on-disk name — see ledger.py's module docstring.
     """
-    entries = await ledger.async_read_ledger(hass, meter_id)
+    entries = await ledger.async_read_ledger(hass, meter_no)
     allow_physical_reset = allocation_unit in ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET
     rows = _normalize_ledger_rows(entries, allocation_unit, scale, allow_physical_reset, entity_id)
     return compute_rolling_window_total(rows, dt_util.now().date(), window_days)

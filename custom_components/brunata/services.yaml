@@ -62,3 +62,36 @@ reconcile_recorder_statistics:
       example: "sensor.brunata_varmt_vand_entre"
       selector:
         text:
+
+backfill_ledger_gap:
+  name: Brunata — Udfyld hul i ledger (manuel)
+  description: >-
+    Henter en målers rigtige historik fra Brunata for et angivet datointerval
+    og fletter den ind i integrationens egen ledger-fil. Manuel udgave af den
+    automatiske hul-detektion der allerede kører ved hver poll (se
+    coordinator.py) — brug denne til at rette huller længere tilbage end den
+    automatiske grænse dækker, eller hvis det automatiske forsøg fejlede.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: >-
+        Den fulde entity_id, fx sensor.brunata_varmt_vand_entre — ikke et
+        meter_id, og ikke navnet ("Varmt vand Entre").
+      required: true
+      example: "sensor.brunata_varmt_vand_entre"
+      selector:
+        text:
+    start_date:
+      name: Startdato
+      description: Startdato for det hul der skal udfyldes, format ÅÅÅÅ-MM-DD.
+      required: true
+      example: "2026-08-12"
+      selector:
+        text:
+    end_date:
+      name: Slutdato
+      description: Slutdato for det hul der skal udfyldes, format ÅÅÅÅ-MM-DD.
+      required: true
+      example: "2026-08-14"
+      selector:
+        text:

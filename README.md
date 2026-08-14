@@ -26,6 +26,9 @@ som sensorer i Home Assistant — inklusive automatisk import af historisk forbr
   ikke er afsluttet), plus forskellen i forhold til samme periode sidste år. Tallene er beregnet
   til at kunne krydstjekkes direkte mod de tilsvarende "Sidste 30 dage"-kort på Brunatas egen
   portal. Se afsnittet ["Dashboard"](#dashboard) nedenfor for opsætning.
+- **Automatisk hul-detektion og -heling** i integrationens egen forbrugs-ledger, plus en native
+  **"Tjek for huller"-knap** til en fuld historik-scan on demand. Se
+  ["Automatisk hul-detektion og -heling"](#automatisk-hul-detektion-og-heling) nedenfor.
 
 ## Krav
 
@@ -222,6 +225,29 @@ er det værd at kigge nærmere på loggen — det kan indikere et reelt, tilbage
 problem (fx med selve måleren eller din netværksforbindelse), i modsætning til en
 enkeltstående, forbigående hændelse som den her beskrevet.
 
+### Automatisk hul-detektion og -heling
+
+Ud over datavalideringen ovenfor (som fanger *forkerte* aflæsninger) holder
+integrationen også øje med *manglende* aflæsninger i sin egen ledger-fil:
+
+- **Automatisk, ved hver almindelig poll:** hvis der er gået længere end 36 timer siden
+  seneste kendte aflæsning for en måler, hentes den manglende periode automatisk fra
+  Brunata og flettes ind i ledgeren — uden nogen handling fra dig. 36 timer er bevidst
+  sat højt: Brunatas målere rapporterer typisk kun 2-4 gange i døgnet, så helt normale
+  huller på op til ca. et døgn er forventede og skal ikke behandles som skader. (En
+  tidligere, for aggressiv grænse på 6 timer forvekslede engang ved et uheld hele den
+  normale pollings-kadence for skader — se version 1.20 i versionshistorikken nedenfor.)
+- **Manuelt, on demand:** den diagnostiske knap **"Tjek for huller"** på enheden
+  gennemsøger hele ledger-historikken for alle aktive målere (ikke kun de seneste 36
+  timer) og retter alt, den finder — praktisk hvis du har mistanke om et ældre,
+  upopdaget hul. Resultatet vises som en persistent notification, uanset om der blev
+  fundet noget eller ej. Knappen har en 5-minutters cooldown, da et fuldt scan kan
+  udløse rigtige Brunata-historik-kald pr. måler.
+- **Manuelt, med præcis kontrol:** service'en `brunata.backfill_ledger_gap` udfylder et
+  selvvalgt datointerval for én bestemt entity — brug den til at rette huller ældre end
+  36 timer uden at vente på et fuldt scan, eller hvis et automatisk/knap-forsøg fejlede.
+  Se `services.yaml` for felterne.
+
 ## Udvikling
 
 Se [`copilot-instructions-del2.md`](copilot-instructions-del2.md) for den fulde arkitekturplan, og
@@ -273,3 +299,28 @@ Version følger skemaet `1.XX`, hvor `XX` er det samlede antal større, afslutte
   herfra i stedet for `statistics_during_period()`, verificeret til at matche
   Brunatas egen hjemmeside præcist. Rummer også en manuel (endnu ikke automatisk
   koblet) service til at rette Energioversigtens statistik fra ledgeren.
+- **1.17** — Atomisk ledger-skrivning (skriv til midlertidig fil, derefter rename) for
+  at undgå en korrupt/halvskrevet ledger-fil ved en pludselig nedlukning midt i en
+  skrivning. Login-fejl klassificeres nu korrekt: et forkert brugernavn/password giver
+  fortsat en `ConfigEntryAuthFailed`, mens en midlertidig fejl hos Brunata selv (fx en
+  503 fra `/rest/authorize`) i stedet giver `ConfigEntryNotReady` (automatisk gentaget
+  forsøg af HA) plus en persistent notification, så en forbigående Brunata-fejl ikke
+  fejlagtigt beder dig om at genindtaste et password, der aldrig var forkert.
+- **1.18** — Automatisk hul-detektion og -heling i forbrugs-ledgeren ved hver almindelig
+  poll (henter kun den manglende hale), plus den manuelle service
+  `brunata.backfill_ledger_gap` til at udfylde et selvvalgt datointerval.
+- **1.19** — Native "Tjek for huller"-knap: en fuld scan af hele ledger-historikken for
+  alle aktive målere (ikke kun halen), med resultatet rapporteret som en persistent
+  notification.
+- **1.20** — Rettet en for aggressiv 6-timers hul-grænse (fandt ved et uheld 3.347
+  "huller" på tværs af al historik, fordi den forvekslede målernes helt normale
+  2-4-gange-i-døgnet pollings-kadence med skader) til 36 timer.
+- **1.21** — Deduplikering af gentagne ledger-linjer (samme tidsstempel+værdi), og
+  dashboard-kortet genopfrisker nu automatisk sine tal efter en hul-heling.
+- **1.22** — Ledger-filer omdøbt fra Brunatas interne, ustabile `meterId` til målerens
+  eget, stabile serienummer (`meterNo`), med en automatisk engangsmigration af
+  eksisterende filer ved opstart.
+- **1.23** — Rettet upålidelig indlæsning af dashboard-kortet på mobil (lejlighedsvis
+  rød "Konfigurationsfejl", især på Android over mobildata): kortet registreres nu som
+  en rigtig Lovelace-ressource (som Lovelace selv garanteret indlæser og venter på),
+  i stedet for et deferred script-tag uden nogen indlæsnings-garanti.

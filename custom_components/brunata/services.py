@@ -20,6 +20,15 @@ ledger.py/reconcile.py): recomputes and corrects one meter's recorder
 long-term statistics from the integration-owned ledger, for fully-elapsed
 past hours only. Built and verified, but deliberately NOT wired into any
 automatic schedule yet — manual-only until proven safe in practice.
+
+`brunata.backfill_ledger_gap` — manual counterpart to coordinator.py's
+automatic gap self-healing (_async_backfill_gap_if_needed): fetches a
+meter's real Brunata history for a given date range and merges it into the
+ledger. The automatic path only ever triggers on a FRESH poll noticing a
+gap since its own last entry; this manual one exists for anything that
+needs outside that — e.g. patching a gap further back than the automatic
+threshold would catch, or re-running it if the automatic attempt itself
+failed (it's best-effort and never blocks the live poll, see coordinator.py).
 """
 
 from __future__ import annotations
@@ -35,13 +44,14 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
-from . import reconcile
+from . import ledger, reconcile
 from .const import ALLOCATION_UNIT_OF_MEASUREMENT, DOMAIN, build_meter_naming
 
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_EXPORT_METER_DATA = "export_meter_data"
 SERVICE_RECONCILE_RECORDER_STATISTICS = "reconcile_recorder_statistics"
+SERVICE_BACKFILL_LEDGER_GAP = "backfill_ledger_gap"
 
 _SERVICE_SCHEMA = vol.Schema(
     {
@@ -55,6 +65,14 @@ _SERVICE_SCHEMA = vol.Schema(
 )
 
 _RECONCILE_SERVICE_SCHEMA = vol.Schema({vol.Required("entity_id"): str})
+
+_BACKFILL_GAP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("entity_id"): str,
+        vol.Required("start_date"): str,
+        vol.Required("end_date"): str,
+    }
+)
 
 
 def _write_debug_query_file(path: str, data: dict) -> None:
@@ -150,10 +168,10 @@ async def _async_handle_export_meter_data(hass: HomeAssistant, call: ServiceCall
 
 
 def _resolve_meter_by_entity_id(hass: HomeAssistant, entity_id: str) -> dict | None:
-    """entity_id -> {"meter_id", "name", "allocation_unit", "scale"}, or None
-    if it doesn't match any currently-loaded Brunata meter. Reverse lookup
-    of the same build_meter_naming() every other entity_id resolution in
-    this integration already relies on.
+    """entity_id -> {"meter_id", "meter_no", "name", "allocation_unit",
+    "scale"}, or None if it doesn't match any currently-loaded Brunata
+    meter. Reverse lookup of the same build_meter_naming() every other
+    entity_id resolution in this integration already relies on.
     """
     for coordinator in hass.data.get(DOMAIN, {}).values():
         naming = build_meter_naming(coordinator.active_meters)
@@ -168,6 +186,7 @@ def _resolve_meter_by_entity_id(hass: HomeAssistant, entity_id: str) -> dict | N
             reading = coordinator.data.get(meter_id) if coordinator.data else None
             return {
                 "meter_id": meter_id,
+                "meter_no": meter["meterNo"],
                 "name": name,
                 "allocation_unit": meter["allocationUnit"],
                 "scale": reading.scale if reading else None,
@@ -191,7 +210,7 @@ async def _async_handle_reconcile_recorder_statistics(hass: HomeAssistant, call:
     try:
         count = await reconcile.async_reconcile_from_ledger(
             hass,
-            meter_id=resolved["meter_id"],
+            meter_no=resolved["meter_no"],
             entity_id=entity_id,
             name=f"Brunata {resolved['name']}",
             unit_of_measurement=ALLOCATION_UNIT_OF_MEASUREMENT[resolved["allocation_unit"]],
@@ -206,6 +225,60 @@ async def _async_handle_reconcile_recorder_statistics(hass: HomeAssistant, call:
     except Exception as err:
         _LOGGER.error(
             "[BRUNATA RECONCILE SERVICE] FAILED for entity_id=%s: %s: %s",
+            entity_id, type(err).__name__, err, exc_info=True,
+        )
+        raise
+
+
+async def _async_handle_backfill_ledger_gap(hass: HomeAssistant, call: ServiceCall) -> None:
+    entity_id = call.data["entity_id"]
+    start_date = call.data["start_date"]
+    end_date = call.data["end_date"]
+    _LOGGER.warning(
+        "[BRUNATA BACKFILL GAP SERVICE] called with entity_id=%s start_date=%s end_date=%s",
+        entity_id, start_date, end_date,
+    )
+
+    resolved = _resolve_meter_by_entity_id(hass, entity_id)
+    if resolved is None:
+        _LOGGER.error(
+            "[BRUNATA BACKFILL GAP SERVICE] FAILED: %s is not a currently-loaded "
+            "Brunata meter entity",
+            entity_id,
+        )
+        raise HomeAssistantError(f"Unknown Brunata meter entity_id: {entity_id}")
+
+    start_date_parsed = dt_util.parse_date(start_date)
+    end_date_parsed = dt_util.parse_date(end_date)
+    if start_date_parsed is None or end_date_parsed is None:
+        raise HomeAssistantError(
+            f"Could not parse start_date/end_date as YYYY-MM-DD: "
+            f"start_date={start_date!r} end_date={end_date!r}"
+        )
+    start_time = dt_util.start_of_local_day(start_date_parsed)
+    end_time = dt_util.start_of_local_day(end_date_parsed)
+
+    client = None
+    for coordinator in hass.data.get(DOMAIN, {}).values():
+        if any(m["meterId"] == resolved["meter_id"] for m in coordinator.active_meters):
+            client = coordinator.client
+            break
+    if client is None:  # pragma: no cover - resolved above via the same active_meters lookup
+        raise HomeAssistantError(f"Could not find a loaded Brunata client for {entity_id}")
+
+    try:
+        count = await ledger.async_backfill_gap_from_brunata(
+            hass, client, resolved["meter_id"], resolved["meter_no"],
+            resolved["allocation_unit"], start_time, end_time
+        )
+        _LOGGER.warning(
+            "[BRUNATA BACKFILL GAP SERVICE] SUCCESS — merged %d point(s) into the "
+            "ledger for %s between %s and %s",
+            count, entity_id, start_time, end_time,
+        )
+    except Exception as err:
+        _LOGGER.error(
+            "[BRUNATA BACKFILL GAP SERVICE] FAILED for entity_id=%s: %s: %s",
             entity_id, type(err).__name__, err, exc_info=True,
         )
         raise
@@ -239,4 +312,16 @@ def async_register_services(hass: HomeAssistant) -> None:
         SERVICE_RECONCILE_RECORDER_STATISTICS,
         _handle_reconcile_recorder_statistics,
         schema=_RECONCILE_SERVICE_SCHEMA,
+    )
+
+    # Manual counterpart to coordinator.py's automatic gap self-healing —
+    # see this module's own docstring.
+    async def _handle_backfill_ledger_gap(call: ServiceCall) -> None:
+        await _async_handle_backfill_ledger_gap(hass, call)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_BACKFILL_LEDGER_GAP,
+        _handle_backfill_ledger_gap,
+        schema=_BACKFILL_GAP_SERVICE_SCHEMA,
     )

@@ -7,7 +7,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
 
-from .exceptions import BrunataLoginError, BrunataDataError, BrunataHttpError, BrunataSessionError
+from .exceptions import (
+    BrunataDataError,
+    BrunataHttpError,
+    BrunataInvalidCredentialsError,
+    BrunataLoginError,
+    BrunataSessionError,
+)
 from .models import ConsumptionData, MeterReading
 from .parser import parse_consumption_payload
 
@@ -136,8 +142,11 @@ class BrunataClient:
             },
         )
         if resp3.status_code == 200:
-            # Login page re-rendered with an error message, per docs/login-flow.md.
-            raise BrunataLoginError("Login failed: wrong username or password")
+            # Login page re-rendered with an error message, per
+            # docs/login-flow.md — the ONE confirmed wrong-credentials case,
+            # deliberately a distinct type from every other BrunataLoginError
+            # raised in this method (see exceptions.py).
+            raise BrunataInvalidCredentialsError("Login failed: wrong username or password")
         if resp3.status_code != 302 or "location" not in resp3.headers:
             raise BrunataLoginError(
                 f"Unexpected response after login POST: {resp3.status_code}"

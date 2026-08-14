@@ -20,6 +20,14 @@ CONF_HISTORY_IMPORTED = "history_imported"
 # async_import_history_if_needed().
 CONF_LEDGER_BACKFILLED = "ledger_backfilled"
 
+# ConfigEntry.data flag: have this entry's ledger files already been renamed
+# from the old <meterId>.jsonl naming to <meterNo>.jsonl (the meter's own
+# serial number, matching what Brunata's own website shows)? See
+# ledger.py's async_migrate_ledger_filenames() — same one-time-flag pattern
+# as the two flags above, so the filesystem is only checked once, not on
+# every poll.
+CONF_LEDGER_FILENAMES_MIGRATED = "ledger_filenames_migrated"
+
 # allocationUnit -> (entity_id slug, display name). These produce exactly the
 # entity IDs required by copilot-instructions-del2.md (sensor.brunata_varme,
 # sensor.brunata_varmt_vand, sensor.brunata_koldt_vand). sensor.py sets

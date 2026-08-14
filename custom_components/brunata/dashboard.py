@@ -48,6 +48,7 @@ behavior with the user — see README's "Dashboard" section).
 from __future__ import annotations
 
 import logging
+import uuid
 
 from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.core import HomeAssistant
@@ -58,6 +59,13 @@ _LOGGER = logging.getLogger(__name__)
 _DASHBOARD_URL_PATH = "brunata"
 _DASHBOARDS_STORAGE_KEY = "lovelace_dashboards"
 _DASHBOARDS_STORAGE_VERSION = 1
+
+# Same undocumented-internal-storage-format approach as the dashboard/view
+# creation below — see async_ensure_lovelace_resource's own docstring for
+# why this exists and why it writes directly to storage rather than calling
+# a live collection object.
+_RESOURCES_STORAGE_KEY = "lovelace_resources"
+_RESOURCES_STORAGE_VERSION = 1
 _DASHBOARD_CONFIG_STORAGE_KEY = f"lovelace.{_DASHBOARD_URL_PATH}"
 _DASHBOARD_CONFIG_STORAGE_VERSION = 1
 
@@ -124,6 +132,68 @@ def _build_views(active_meters: list[dict]) -> list[dict]:
             "sections": [header_section, *meter_sections],
         }
     ]
+
+
+async def async_ensure_lovelace_resource(hass: HomeAssistant, js_url: str) -> None:
+    """Register brunata-monthly-card.js as a proper Lovelace *resource*
+    (type "module"), called once from __init__.py's async_setup().
+
+    Confirmed real case this exists for (2026-08-15): the card was
+    originally registered via frontend.add_extra_js_url(), which injects a
+    plain, deferred `<script type="module">` into every page's `<head>` —
+    that gives NO guarantee it finishes loading before Lovelace tries to
+    create a `custom:brunata-monthly-card` element, unlike a proper
+    Lovelace resource, which `ha-panel-lovelace` itself explicitly loads
+    and waits for before evaluating any dashboard's cards. On a slow/flaky
+    connection (a user's Android companion app on mobile data) that
+    unguaranteed race was reliably LOST — showing a red "Konfigurationsfejl"
+    card that only cleared after several manual reloads happened to win it.
+    Even making the file cache-friendly (cache_headers=True) didn't fix
+    this, since caching only speeds up the same unguaranteed race, it
+    doesn't remove it. Registering the same URL as both add_extra_js_url
+    AND a resource would call `customElements.define()` for the same tag
+    twice and throw — so this is the ONLY registration path now, not an
+    addition to it.
+
+    Same undocumented-internal-storage-format approach as
+    async_setup_dashboard below (no live, reachable ResourceStorageCollection
+    API confirmed either — same reasoning, see this module's own docstring):
+    writes directly to `.storage/lovelace_resources` in the same shape
+    Lovelace's own resource-storage code produces. Same known limitation:
+    takes effect from the user's NEXT Home Assistant restart, not instantly
+    — logged clearly below, same as the dashboard creation case.
+
+    Only ever adds an entry if this exact `url` isn't already registered —
+    never touches, duplicates, or reorders any existing resource, including
+    ones the user added by hand.
+    """
+    try:
+        store = Store(hass, _RESOURCES_STORAGE_VERSION, _RESOURCES_STORAGE_KEY)
+        data = await store.async_load()
+        items = list((data or {}).get("items", []))
+
+        if any(item.get("url") == js_url for item in items):
+            _LOGGER.debug("Brunata card already registered as a Lovelace resource")
+            return
+
+        items.append({"id": uuid.uuid4().hex, "type": "module", "url": js_url})
+        await store.async_save({"items": items})
+
+        _LOGGER.warning(
+            "Registered the Brunata dashboard card as a Lovelace resource. "
+            "It will load reliably (no more occasional 'Konfigurationsfejl' "
+            "cards) starting from your next Home Assistant restart — this "
+            "integration has no way to make the running Lovelace panel pick "
+            "it up without one."
+        )
+    except Exception as err:  # noqa: BLE001 — deliberately broad, see module docstring
+        _LOGGER.warning(
+            "Could not register the Brunata card as a Lovelace resource "
+            "(%s: %s). Add it manually instead: Indstillinger → Dashboards → "
+            "Ressourcer (øverste højre menu) → tilføj ressource, URL %s, "
+            "type JavaScript-modul.",
+            type(err).__name__, err, js_url,
+        )
 
 
 async def async_setup_dashboard(hass: HomeAssistant, active_meters: list[dict]) -> None:

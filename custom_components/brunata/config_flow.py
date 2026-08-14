@@ -10,7 +10,7 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
 
 from .brunata_client import BrunataClient
-from .brunata_client.exceptions import BrunataLoginError
+from .brunata_client.exceptions import BrunataInvalidCredentialsError, BrunataLoginError
 
 from .const import DOMAIN
 
@@ -46,8 +46,13 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await _validate_credentials(
                     user_input[CONF_USERNAME], user_input[CONF_PASSWORD]
                 )
-            except BrunataLoginError:
+            except BrunataInvalidCredentialsError:
                 errors["base"] = "invalid_auth"
+            except BrunataLoginError:
+                # Anything else (e.g. a transient Brunata server hiccup) is
+                # NOT a confirmed credentials problem — don't tell the user
+                # their password is wrong when it might not be.
+                errors["base"] = "unknown"
             except Exception:  # unexpected transport/protocol failure
                 errors["base"] = "unknown"
             else:
@@ -73,8 +78,13 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await _validate_credentials(
                     user_input[CONF_USERNAME], user_input[CONF_PASSWORD]
                 )
-            except BrunataLoginError:
+            except BrunataInvalidCredentialsError:
                 errors["base"] = "invalid_auth"
+            except BrunataLoginError:
+                # Anything else (e.g. a transient Brunata server hiccup) is
+                # NOT a confirmed credentials problem — don't tell the user
+                # their password is wrong when it might not be.
+                errors["base"] = "unknown"
             except Exception:  # unexpected transport/protocol failure
                 errors["base"] = "unknown"
             else:

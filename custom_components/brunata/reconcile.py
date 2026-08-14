@@ -44,7 +44,7 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_reconcile_from_ledger(
     hass: HomeAssistant,
-    meter_id: int,
+    meter_no: str,
     entity_id: str,
     name: str,
     unit_of_measurement: str,
@@ -57,10 +57,13 @@ async def async_reconcile_from_ledger(
     hour is always excluded, so this can never race the recorder's own live
     compilation of that same period.
 
+    `meter_no` is the meter's own serial number, matching the ledger file's
+    on-disk name — see ledger.py's module docstring.
+
     Returns the number of hourly periods reconciled (0 if the ledger has no
     entries for this meter yet).
     """
-    entries = await ledger.async_read_ledger(hass, meter_id)
+    entries = await ledger.async_read_ledger(hass, meter_no)
     if not entries:
         return 0
 

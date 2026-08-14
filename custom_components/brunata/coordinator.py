@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.components.logbook import async_log_entry
 from homeassistant.config_entries import ConfigEntry
@@ -35,6 +35,7 @@ from .const import (
     ALLOCATION_UNITS_ALLOWING_PHYSICAL_RESET,
     CONF_HISTORY_IMPORTED,
     CONF_LEDGER_BACKFILLED,
+    CONF_LEDGER_FILENAMES_MIGRATED,
     DOMAIN,
     UPDATE_INTERVAL,
     build_meter_naming,
@@ -51,6 +52,23 @@ _MIN_OBSERVATIONS = 5
 _WATER_HISTORY_LEN = 30
 _HEAT_HISTORY_LEN = 14
 _ROUND_TO_MINUTES = 5
+
+# Automatic ledger gap-healing: how far behind a meter's last known ledger
+# entry a fresh poll's reading has to land before it's treated as a gap
+# worth backfilling from Brunata's own history, rather than just normal
+# poll-to-poll spacing. MUST stay comfortably above the longest gap a meter
+# can produce under completely normal operation — water meters only phone
+# home 2-4 times/day, so back-to-back readings up to ~24h apart (a day with
+# just one successful poll) are routine, not damage. Confirmed the hard way
+# (2026-08-14): 6h was far too tight — async_find_and_heal_all_gaps's full-
+# history scan (below) treated nearly every normal overnight/daytime gap
+# across 3 years of ledger history as a "gap", triggering ~3300 needless
+# Brunata history re-fetches in a single button press. 36h gives a full day
+# of margin above the ~24h normal maximum while still catching the real
+# case this exists for: an unattended ConfigEntryAuthFailed period silently
+# stopping all polling for a day or more, 2026-08-12/13 (see README's
+# "Kendte begrænsninger").
+_LEDGER_GAP_THRESHOLD = timedelta(hours=36)
 
 
 class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]]):
@@ -169,6 +187,28 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
             self._log_activity(f"Kunne ikke hente data fra Brunata Online: {err}")
             raise UpdateFailed(str(err)) from err
 
+        # One-time migration from the old <meterId>.jsonl ledger filenames to
+        # <meterNo>.jsonl (the meter's own serial number — see ledger.py's
+        # module docstring). MUST run before _async_append_ledger_entries
+        # below ever writes under the new naming, otherwise a fresh, empty
+        # <meterNo>.jsonl could get created first and permanently block the
+        # real migration (async_migrate_ledger_filenames refuses to overwrite
+        # an existing new_path).
+        if not self.entry.data.get(CONF_LEDGER_FILENAMES_MIGRATED):
+            try:
+                await ledger.async_migrate_ledger_filenames(self.hass, self.active_meters)
+            except Exception as err:  # noqa: BLE001 — best-effort, must not break the live poll
+                _LOGGER.warning(
+                    "Could not migrate ledger filenames from meterId to meterNo "
+                    "(%s: %s) — will retry on the next poll",
+                    type(err).__name__, err,
+                )
+            else:
+                self.hass.config_entries.async_update_entry(
+                    self.entry,
+                    data={**self.entry.data, CONF_LEDGER_FILENAMES_MIGRATED: True},
+                )
+
         readings_by_id = {m.meter_id: m for m in consumption.raw_meters}
         result: dict[int, MeterReading] = {}
         for meter in self.active_meters:
@@ -233,6 +273,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
         for it (reading_value/reading_date both None — e.g. active per
         metersforconsumer but absent from this cycle's meteroverview), since
         there's nothing real to record in that case.
+
+        Before appending, checks for (and self-heals) a gap against this
+        meter's own ledger — see _async_backfill_gap_if_needed.
         """
         for meter_id, reading in readings.items():
             if reading.reading_value is None or reading.reading_date is None:
@@ -241,9 +284,118 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
                 ts = parse_brunata_datetime(reading.reading_date)
             except (ValueError, TypeError):
                 continue
+
+            try:
+                await self._async_backfill_gap_if_needed(
+                    meter_id, reading.meter_no, reading.allocation_unit, ts
+                )
+            except Exception as err:  # noqa: BLE001 — best-effort, must not break the live poll or the append below
+                _LOGGER.warning(
+                    "[BRUNATA LEDGER GAP] Could not check/backfill meter %s (%s: %s) "
+                    "— continuing with just this poll's reading",
+                    meter_id, type(err).__name__, err,
+                )
+
             await ledger.async_append_entry(
-                self.hass, meter_id, reading.allocation_unit, ts, reading.reading_value
+                self.hass, reading.meter_no, reading.allocation_unit, ts, reading.reading_value
             )
+
+    async def _async_backfill_gap_if_needed(
+        self, meter_id: int, meter_no: str, allocation_unit: str, new_reading_ts: datetime
+    ) -> int:
+        """Self-healing: if this poll's reading lands more than
+        _LEDGER_GAP_THRESHOLD after the meter's own last known ledger entry,
+        that's a gap worth closing — and, crucially, detecting it needs no
+        knowledge of what Brunata's own "sidste 30 dage" figure should be
+        (which this integration has no way to check against automatically);
+        it only needs the ledger's own timestamps to notice its own silence.
+
+        Fetches exactly the missing window from Brunata's history endpoint
+        (not the live meteroverview snapshot, which only ever returns the
+        single CURRENT reading — see fetch_consumption_data's docstring —
+        and so can never recover what happened during a gap on its own) and
+        merges it into the ledger before this poll's own entry is appended.
+
+        A brand new meter (empty ledger, e.g. right after the one-time
+        backfill hasn't run yet) has nothing to compare against — this is
+        the expected, harmless case, not a gap.
+
+        Returns the number of history points backfilled (0 if there was no
+        gap, or nothing to compare against yet) — lets callers that need to
+        report a result (e.g. the manual "check for gaps" button) summarize
+        what actually happened, on top of this always being logged either way.
+        """
+        existing = await ledger.async_read_ledger(self.hass, meter_no)
+        if not existing:
+            return 0
+        last_known_ts, _last_value = existing[-1]
+        gap = new_reading_ts - last_known_ts
+        if gap <= _LEDGER_GAP_THRESHOLD:
+            return 0
+
+        _LOGGER.warning(
+            "[BRUNATA LEDGER GAP] meter %s: %s since last ledger entry (last "
+            "known %s, new reading %s) — backfilling from Brunata's history",
+            meter_id, gap, last_known_ts, new_reading_ts,
+        )
+        count = await ledger.async_backfill_gap_from_brunata(
+            self.hass, self.client, meter_id, meter_no, allocation_unit, last_known_ts, new_reading_ts
+        )
+        _LOGGER.warning(
+            "[BRUNATA LEDGER GAP] meter %s: backfilled %d point(s) to close the gap",
+            meter_id, count,
+        )
+        return count
+
+    async def async_check_and_backfill_all_gaps(
+        self,
+    ) -> dict[int, list[tuple[datetime, datetime, int]]]:
+        """Full-HISTORY version of the gap check — scans every active
+        meter's entire ledger for gaps ANYWHERE in it (see
+        ledger.async_find_and_heal_all_gaps), not just the trailing edge
+        that _async_backfill_gap_if_needed above is limited to.
+
+        That limitation is exactly why this exists: confirmed real case,
+        2026-08-12/13 — by the time anyone pressed a button to check, normal
+        polling had already resumed and moved the ledger's tail well past
+        the gap, so the trailing-edge check found nothing even though the
+        hole itself was never actually filled. A full scan has no such
+        blind spot.
+
+        Backs the manual "Tjek for huller"-button (button.py). Deliberately
+        NOT run automatically on every poll like the trailing-edge check
+        above — an unrecoverable historical gap (Brunata genuinely has no
+        data for some window) would otherwise get re-fetched forever; this
+        is safe specifically because a human decides when to trigger it.
+
+        Returns {meter_id: [(gap_start, gap_end, points_backfilled), ...]}
+        for only the meters where at least one gap was found — an empty
+        dict means "checked every meter, found nothing", a real, distinct,
+        reassuring outcome callers should report just as clearly as finding
+        something.
+
+        If anything was healed, also triggers a fresh coordinator refresh
+        before returning — confirmed real case this fixes (2026-08-14): this
+        method only ever touches the ledger FILES on disk, never
+        self.monthly_summaries/rolling_summaries (only
+        _async_compute_summaries, run as part of the regular poll cycle,
+        does that) — so a healed gap was invisible on the dashboard card
+        until the next scheduled poll, even though the underlying ledger
+        data was already correct. A user pressing "Tjek for huller" wants to
+        see the result reflected immediately, not after waiting up to an
+        hour for the next poll.
+        """
+        results: dict[int, list[tuple[datetime, datetime, int]]] = {}
+        for meter in self.active_meters:
+            meter_id = meter["meterId"]
+            healed = await ledger.async_find_and_heal_all_gaps(
+                self.hass, self.client, meter_id, meter["meterNo"], meter["allocationUnit"]
+            )
+            if healed:
+                results[meter_id] = healed
+        if results:
+            await self.async_request_refresh()
+        return results
 
     def _record_reading_observations(self, readings: dict[int, MeterReading]) -> None:
         """Append a new observation to a meter's rolling history whenever its
@@ -383,14 +535,14 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
             scale = reading.scale if reading else None
 
             monthly = await statistics.async_get_monthly_summary(
-                self.hass, meter_id, allocation_unit=allocation_unit,
+                self.hass, meter["meterNo"], allocation_unit=allocation_unit,
                 scale=scale, entity_id=entity_id,
             )
             monthly["scale"] = scale
             monthly_summaries[meter_id] = monthly
 
             rolling = await statistics.async_get_rolling_summary(
-                self.hass, meter_id, allocation_unit=allocation_unit,
+                self.hass, meter["meterNo"], allocation_unit=allocation_unit,
                 scale=scale, entity_id=entity_id,
             )
             rolling["scale"] = scale
@@ -460,7 +612,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[int, MeterReading]
 
             if needs_ledger_backfill:
                 await ledger.async_backfill_from_points(
-                    self.hass, result.meter_id, allocation_unit, result.points
+                    self.hass, meter["meterNo"], allocation_unit, result.points
                 )
 
         entry_updates: dict = {}

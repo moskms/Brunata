@@ -10,6 +10,15 @@ data/consumption.json
 brunata_debug/
 config/brunata_debug/
 
+# Rigtig ledger-data kopieret ind lokalt til analyse — personlige forbrugsdata,
+# må aldrig committes (samme begrundelse som brunata_debug/ ovenfor)
+brunata_ledger/
+
+# HAR-captures brugt til reverse-engineering af login-flow/API — indeholder ofte
+# ukrypteret sessions-/personoplysninger (bekræftet: navn/email i mindst én, se
+# git-historik-oprydningen 2026-08-14). Optag/gem lokalt til analyse, commit aldrig.
+docs/*.har
+
 # Python
 __pycache__/
 *.py[cod]

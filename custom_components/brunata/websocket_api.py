@@ -123,7 +123,7 @@ async def ws_monthly_summary(hass: HomeAssistant, connection, msg) -> None:
     scale = _scale_for_meter(hass, meter_id)
     result = await statistics.async_get_monthly_summary(
         hass,
-        meter_id,
+        meter["meterNo"],
         msg.get("year"),
         allocation_unit=meter.get("allocationUnit"),
         scale=scale,
@@ -154,7 +154,7 @@ async def ws_daily_breakdown(hass: HomeAssistant, connection, msg) -> None:
     entity_id, meter = resolved
     result = await statistics.async_get_daily_breakdown(
         hass,
-        meter_id,
+        meter["meterNo"],
         msg["year"],
         msg["month"],
         allocation_unit=meter.get("allocationUnit"),
@@ -182,7 +182,7 @@ async def ws_rolling_summary(hass: HomeAssistant, connection, msg) -> None:
     scale = _scale_for_meter(hass, meter_id)
     result = await statistics.async_get_rolling_summary(
         hass,
-        meter_id,
+        meter["meterNo"],
         allocation_unit=meter.get("allocationUnit"),
         scale=scale,
         entity_id=entity_id,

@@ -702,11 +702,20 @@ class BrunataMonthlyCard extends HTMLElement {
   }
 }
 
-customElements.define("brunata-monthly-card", BrunataMonthlyCard);
+// Guard against "NotSupportedError: this name has already been used" —
+// confirmed real case this matters for (2026-08-15): switching from
+// frontend.add_extra_js_url() to a proper Lovelace resource registration
+// means a browser/companion-app that still has the OLD registration
+// cached (e.g. mid-upgrade, before its own next full reload picks up the
+// new registration-only-once setup) could otherwise end up loading this
+// script twice in the same page and crash on the second define() call.
+if (!customElements.get("brunata-monthly-card")) {
+  customElements.define("brunata-monthly-card", BrunataMonthlyCard);
 
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "brunata-monthly-card",
-  name: "Brunata forbrug",
-  description: "Årligt forbrug pr. måler (måned for måned) med år-til-år-sammenligning.",
-});
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "brunata-monthly-card",
+    name: "Brunata forbrug",
+    description: "Årligt forbrug pr. måler (måned for måned) med år-til-år-sammenligning.",
+  });
+}
