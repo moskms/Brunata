@@ -71,6 +71,106 @@ gamle entiteter (ingen integration angivet), og fjern dem via **Fjern**-knappen.
 ikke de aktive entiteter fra denne integration (som står under enheden "Brunata" med et rigtigt
 område tilknyttet), da de to er fuldstændig uafhængige registreringer.
 
+## Installation og opsætning med hjælp fra Claude
+
+Vil du have en AI-assistent (fx Claude) til at guide dig gennem hele installationen og stille de
+spørgsmål, der skal afklares, før integrationen kan oprettes, kan du give den prompten nedenfor som
+første besked. Assistenten kan ikke selv installere noget i din Home Assistant — den guider dig
+trin for trin, og du udfører trinene selv. Dine login-oplysninger må **aldrig** skrives i chatten;
+de indtastes kun i Home Assistants egen opsætningsdialog.
+
+Prompten er skrevet til version **1.23** (se `custom_components/brunata/manifest.json`). Opdatér den,
+når integrationen ændrer opsætningen, så den altid passer til den aktuelle version.
+
+````
+Du skal hjælpe mig med at installere og sætte Brunata Online-integrationen op i min Home
+Assistant, så den virker. Repoet er moskms/Brunata. Læs først README.md og
+custom_components/brunata/manifest.json, så du kender den aktuelle version, og hvad
+integrationen gør.
+
+## Sådan skal du arbejde
+- Svar på dansk. Giv præcise, klar-til-copy-paste trin.
+- Tag ét trin ad gangen, og vent på min bekræftelse, før du går videre.
+- Gæt aldrig på API-adfærd, HA-interne funktioner eller menunavne. Bekræft via repoets kode,
+  README og docs/-mappen, eller spørg mig. Er du usikker på en knaps eller menus navn i HA,
+  så sig det, i stedet for at beskrive den upræcist.
+- Brug de danske betegnelser fra Home Assistants brugerflade.
+- Foreslå ikke workarounds, der ikke skalerer. Foreslå den rigtige løsning.
+- Bed mig ALDRIG skrive mit Brunata-brugernavn eller password i chatten. De indtastes kun i
+  HA's opsætningsdialog.
+- Spørg ikke gentagne gange, om filer er kopieret, eller om HA er genstartet. Jeg skriver, når
+  det er gjort.
+
+## Trin 0: Stil mig disse spørgsmål samlet, og vent på mine svar, FØR du gør andet
+1. Hvilken version af Home Assistant kører jeg (Indstillinger → System → Om)? Kræves:
+   2024.9 eller nyere. Er det HA OS, Container eller en anden installationstype?
+2. Hvordan kommer jeg til HA's konfigurationsmappe (netværksshare, SSH, Samba-add-on, File
+   editor), og hvad er stien? Integrationen skal ligge i config/custom_components/brunata/.
+3. Er integrationen allerede installeret i en ældre version? Hvis ja: hvilken version står i
+   custom_components/brunata/manifest.json på min HA?
+4. Har jeg tidligere kørt den gamle AppDaemon-baserede version? (Så skal de gamle, ugrupperede
+   entiteter ryddes, se README-afsnittet "Opgraderer du fra den gamle AppDaemon-baserede
+   version?")
+5. Har jeg en aktiv Brunata Online-konto på online.brunata.com, hvor jeg kan logge ind med
+   email og password?
+6. Er det en privat forbrugerkonto? (Erhvervskonti og andre Brunata-portaler er ikke
+   understøttet.)
+7. Må integrationen oprette dashboardet "Brunata" automatisk? Har jeg i så fald allerede et
+   dashboard med stien "brunata"? (Et eksisterende rører integrationen aldrig.)
+8. Skal varme- og vandsensorerne bruges i Energidashboardet?
+9. Hvilke klienter åbner jeg HA fra (Chrome, Android-app, Windows-app)?
+
+## Trin 1: Forudsætningstjek
+Bekræft sammen med mig: HA-version, adgang til config-mappen, at jeg kan læse
+home-assistant.log (Indstillinger → System → Logge), og at der ikke ligger en gammel brunata-mappe
+i vejen.
+
+## Trin 2: Installation (manuel; HACS er endnu ikke understøttet)
+1. Jeg kopierer hele mappen custom_components/brunata/ fra repoet til
+   config/custom_components/brunata/ på min HA. Ved en opgradering erstattes hele mappen.
+2. Jeg genstarter Home Assistant. Ved en opgradering er en almindelig genstart nok; ved
+   problemer med en gammel cachet kortfil bruges en fuld genstart.
+
+## Trin 3: Opsætning i HA
+Guid mig gennem: Indstillinger → Enheder og tjenester → Tilføj integration → søg
+"Brunata Online" → indtast brugernavn (email) og password → Send.
+Integrationen validerer login med det samme og opretter en enhed "Brunata" med sensorer for de
+målere, der findes (koldt vand i m³, varmt vand i m³, varme i kWh), samt knapperne "Opdatér nu"
+og "Tjek for huller" og en statussensor. Historik-importen starter i baggrunden ved første
+opsætning. Forklar mig, hvad jeg skal se, og hvad jeg gør, hvis login fejler. Har jeg skiftet mit
+password hos Brunata, bruges integrationens "Rekonfigurér"-funktion (de tre prikker ud for
+integrationen).
+
+## Trin 4: Verificér, ét punkt ad gangen
+- Enheden "Brunata" findes med de forventede målere og sensorer.
+- Historikken er importeret (graferne er fyldt fra start).
+- Dashboardet "Brunata" findes i sidebjælken. Det dukker først op efter en genstart af HA.
+  Hvis det mangler, hjælp mig med at indsætte YAML'en fra README-afsnittet "Dashboard".
+- Kortet custom:brunata-monthly-card vises uden "Konfigurationsfejl". Opstår
+  "Custom element doesn't exist: brunata-monthly-card", så åbn browserens DevTools →
+  Network, filtrér på "brunata", og tjek, om brunata-monthly-card.js hentes (status 200 eller
+  304). På Android kan Samsung Auto Blocker blokere HA-appen (Indstillinger → Sikkerhed og
+  privatliv), og Windows-appen kan have en gammel kortfil cachet, så en ominstallation kan
+  være nødvendig.
+- Statussensoren viser poll-succes/-fejl i enhedens Aktivitet-fane.
+- home-assistant.log er fri for fejl fra brunata. Afviste aflæsninger logges med markøren
+  [BRUNATA DATA VALIDATION].
+
+## Trin 5: Fejlsøgning (kun hvis noget ser forkert ud)
+- Mistanke om hul i data: tryk på knappen "Tjek for huller". Til et bestemt datointerval
+  bruges servicen brunata.backfill_ledger_gap (Udviklerværktøjer → Handlinger).
+- Rå målerdata til sammenligning med Brunatas portal: servicen brunata.export_meter_data
+  skriver til /config/brunata_debug_query.json. Filerne i config/brunata_debug/ indeholder
+  personlige forbrugsdata og må ikke committes eller deles.
+- Skal integrationen genindlæses, så brug Indstillinger → Enheder og tjenester → Brunata →
+  "⋮" → Genindlæs. Fjern/geninstallér IKKE, da det udløser en unødvendig fuld
+  historik-genimport.
+
+## Afslutning
+Opsummér hvad der er installeret (version, målere fundet, dashboard ja/nej), og list eventuelle
+åbne punkter.
+````
+
 ## Konfiguration
 
 Der er ingen yderligere konfiguration ud over brugernavn/password ved opsætning. Skal du opdatere
